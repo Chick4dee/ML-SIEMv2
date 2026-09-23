@@ -133,8 +133,7 @@
 <p>Вокруг каждой временной границы — зона ±{{ ((splits[0].params.gap_ms if splits else 600000) / 60000)|int }} мин.
   Поток, задевающий её, не входит ни в одну часть: иначе куски одной сессии попали бы и в train, и в test.</p>
 {% for s in splits %}
-<p><b>{{ s.name }}</b>: {{ s.excluded.total|num }} потоков
-  {% if s.excluded.by_label %}({% for c, n in s.excluded.by_label.items() %}{{ c }} {{ n|num }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}.</p>
+<p><b>{{ s.name }}</b>: {{ s.excluded.total|num }} потоков{% if s.excluded.by_label %} ({% for c, n in s.excluded.by_label.items() %}{{ c }} {{ n|num }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}.</p>
 {% endfor %}
 
 <h2 id="audit">Аудит артефактов</h2>
@@ -147,7 +146,11 @@
 {% for a in audits %}
 <h3>{{ a.name }} <span class="muted">— полей {{ a.n_fields }}, базовая линия {{ a.baseline|f3 }},
   dangerous {{ a.n_dangerous }}, suspicious {{ a.n_suspicious }}</span></h3>
-{% if a.chart %}<img src="{{ a.chart }}" alt="Прирост над базовой линией по полям {{ a.name }}">{% endif %}
+{% if a.not_evaluable %}
+<p class="suspicious">Аудит невозможен: в val этого разбиения меньше двух классов — любое поле
+  «угадывает» единственный класс, и PR-AUC ничего не говорит. См. отсутствующие классы выше.</p>
+{% endif %}
+{% if a.chart and not a.not_evaluable %}<img src="{{ a.chart }}" alt="Прирост над базовой линией по полям {{ a.name }}">{% endif %}
 {% if a.flagged %}
 <div class="scroll"><table>
   <tr><th>Поле</th><th>Группа</th><th>Вариант</th><th>PR-AUC</th><th>База</th><th>Lift</th><th>Статус</th></tr>
@@ -157,7 +160,7 @@
     <td class="n">{{ r.lift|f3 }}</td><td><span class="tag {{ r.status }}">{{ r.status }}</span></td></tr>
   {% endfor %}
 </table></div>
-{% else %}<p class="ok">Опасных и подозрительных полей нет.</p>{% endif %}
+{% elif not a.not_evaluable %}<p class="ok">Опасных и подозрительных полей нет.</p>{% endif %}
 {% endfor %}
 
 <h2 id="v1">Сверка с v1</h2>

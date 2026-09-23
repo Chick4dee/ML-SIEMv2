@@ -96,7 +96,7 @@ description: "Задачи фичи 001 — пайплайн данных NIDS"
 - [X] T025 [US1] Реализовать `src/mlsiem/data/pipeline.py` (зависит от T015, T016, T022–T024): прогон списка захватов по одному — `needs_processing` → extract → разметка → атомарная запись parquet (метаданные `mlsiem.schema_version`, `mlsiem.labeling_version`, `mlsiem.capture_id`) и манифеста (`label_source_fingerprint` — отпечаток GT CSV или `.binetflow`, `labeling_params_hash` — хеш `timezone`, допуска и метки по умолчанию, `n_flows`, `n_matched`, `label_counts`, `content_hash`, `warnings`, `started_at`, `finished_at`, `status`, `error`); ошибка чтения одного захвата → `failed` с причиной, остальные продолжаются; `MemoryError`/`ENOSPC` → текущий захват `failed`, исключение пробрасывается дальше и прогон останавливается (следующие упали бы так же); пик памяти процесса вместе с дочерними процессами nfstream (`psutil`, опрос в фоновом потоке раз в секунду) → поле манифеста `peak_rss_mb`; пропущенный захват манифест не перезаписывает; прогресс «[i/N] capture_id: пропущен/готово/ошибка»; итог `data/flows/<dataset>/summary.csv` (capture_id, status, n_flows, n_matched, match_rate, классы, peak_rss_mb) без отметок времени, строки отсортированы по `capture_id` — чтобы DVC не перезапускал зависимые стадии, когда данные не менялись; экспорт `data/flows/schema.json`
 - [X] T026 [US1] Подключить подкоманду `flows` в `src/mlsiem/cli.py`: `--dataset {unsw,ctu13}`, `--capture ID ...` (формы `22-1-2015:1` и `7` → `capture_id`), `--full-hash`, `--force`; сводка в stdout (всего потоков, сопоставлено, распределение классов); коды `0`/`1`/`2`
 - [X] T027 [US1] Добавить стадии `flows_unsw` и `flows_ctu13` в `dvc.yaml`: `cmd: uv run mlsiem data flows --dataset …`, deps — код `src/mlsiem/data` и `configs/data.yaml`, outs — `data/flows/<dataset>` (`persist: true`, чтобы работало возобновление)
-- [ ] T028 [US1] Прогнать quickstart шаги 2–3 на CTU-13 №7 и записать итог (число потоков, доля сопоставления, хеш) в `docs/JOURNAL.md`
+- [X] T028 [US1] Прогнать quickstart шаги 2–3 на CTU-13 №7 и записать итог (число потоков, доля сопоставления, хеш) в `docs/JOURNAL.md`
 - [X] T028a [US1] Проверить память заранее: прогнать `flows --dataset unsw --capture <самый большой PCAP>`, записать `peak_rss_mb` и время в `docs/JOURNAL.md`; если пик > 12 ГБ — вернуться к T016 и сортировать частями (research R2)
 
 **Checkpoint**: US1 работает сама по себе — размеченный набор для любого датасета/захвата
@@ -166,7 +166,7 @@ description: "Задачи фичи 001 — пайплайн данных NIDS"
 ### Реализация US4
 
 - [X] T042 [US4] Подключить подкоманду `extract PCAP --output PATH` в `src/mlsiem/cli.py`: `capture_id` = `adhoc_<имя файла без расширения>` (без двоеточий), вызов того же `extract.py` без разметки, атомарная запись, `schema_version` в метаданных; проверка расширения `.pcap`/`.pcapng`
-- [ ] T043 [US4] Прогнать quickstart шаг 5 на CTU-13 №7 и отметить результат в `docs/JOURNAL.md`
+- [X] T043 [US4] Прогнать quickstart шаг 5 на CTU-13 №7 и отметить результат в `docs/JOURNAL.md`
 
 **Checkpoint**: train = serve доказано на файле
 
@@ -198,11 +198,11 @@ description: "Задачи фичи 001 — пайплайн данных NIDS"
 
 - [X] T048 Реализовать подкоманду `all` в `src/mlsiem/cli.py` как вызов `dvc repro` (flows оба датасета → три split → audit → compare-v1 → report) с понятным сообщением, если DVC не инициализирован; проверить `dvc.yaml` целиком (`uv run dvc dag`)
 - [X] T049 [P] Прогнать `uv run ruff check src tests` и `uv run ruff format --check src tests`, исправить замечания
-- [ ] T050 Полный прогон `uv run mlsiem data all` (quickstart шаг 6): проверить `max(peak_rss_mb)` по манифестам < 12 288 (SC-001), проверить 93 захвата `done`, инварианты разбиений, долю сопоставления CTU-13 против v1 (SC-004)
-- [ ] T051 Проверить возобновление (quickstart шаг 4, SC-002): прервать `flows --dataset unsw` после 2–3 захватов, перезапустить, убедиться, что готовые пропущены и нет полуготовых parquet
-- [ ] T052 Разобрать необъяснённые расхождения из `data/compare_v1.csv` и `suspicious`-поля аудита; вписать объяснения в `configs/v1_diff_notes.yaml`, перестроить отчёт; убедиться, что по отчёту за 5 минут понятно: сколько данных, какие классы, где дисбаланс, какие признаки опасны (SC-008)
-- [ ] T053 Версионирование (quickstart шаг 7): `uv run dvc status`, `uv run dvc push` в `A:/dvc-remote-v2`; `git status` не содержит parquet/PCAP/отчётов
-- [ ] T054 [P] Итоговая запись в `docs/JOURNAL.md`: что сделано в 001, цифры полного прогона (время, пик памяти, объёмы, доли сопоставления), опасные поля, отличия от v1, известные ограничения
+- [X] T050 Полный прогон `uv run mlsiem data all` (quickstart шаг 6): проверить `max(peak_rss_mb)` по манифестам < 12 288 (SC-001), проверить 93 захвата `done`, инварианты разбиений, долю сопоставления CTU-13 против v1 (SC-004)
+- [X] T051 Проверить возобновление (quickstart шаг 4, SC-002): прервать `flows --dataset unsw` после 2–3 захватов, перезапустить, убедиться, что готовые пропущены и нет полуготовых parquet
+- [X] T052 Разобрать необъяснённые расхождения из `data/compare_v1.csv` и `suspicious`-поля аудита; вписать объяснения в `configs/v1_diff_notes.yaml`, перестроить отчёт; убедиться, что по отчёту за 5 минут понятно: сколько данных, какие классы, где дисбаланс, какие признаки опасны (SC-008)
+- [X] T053 Версионирование (quickstart шаг 7): `uv run dvc status`, `uv run dvc push` в `A:/dvc-remote-v2`; `git status` не содержит parquet/PCAP/отчётов
+- [X] T054 [P] Итоговая запись в `docs/JOURNAL.md`: что сделано в 001, цифры полного прогона (время, пик памяти, объёмы, доли сопоставления), опасные поля, отличия от v1, известные ограничения
 
 ---
 

@@ -102,12 +102,16 @@ def cmd_audit(args, cfg) -> int:
     from mlsiem.data.audit import run_audit
 
     result = run_audit(cfg, args.split, data_dir=Path(args.data_dir))
-    flagged = result.filter(result["status"] != "ok").sort(["status", "lift"], descending=True)
+    flagged = result.filter(result["status"].is_in(["dangerous", "suspicious"])).sort(
+        ["status", "lift"], descending=True
+    )
     _out(
         f"Аудит {args.split}: проверено полей {result.height}, "
         f"опасных {int((result['status'] == 'dangerous').sum())}, "
         f"подозрительных {int((result['status'] == 'suspicious').sum())}"
     )
+    if result.height and (result["status"] == "n/a").all():
+        _out("Аудит невозможен: в val меньше двух классов (см. отсутствующие классы разбиения)")
     _out(
         f"Порог dangerous: lift ≥ {cfg.audit.dangerous_lift}; "
         f"suspicious: PR-AUC ≥ {cfg.audit.suspicious_pr_auc}"

@@ -124,7 +124,10 @@ def _match_chart(rows: list[dict], ds: str) -> str:
     ax.set_xticks(range(len(ids)))
     ax.set_xticklabels(ids, rotation=90, fontsize=6 if len(ids) > 30 else 8)
     ax.set_ylabel("доля сопоставленных" if ds == "ctu13" else "доля атак (сопоставлено)")
-    ax.set_ylim(0, 1)
+    # У UNSW «сопоставлено» — это доля атак, единицы процентов: на шкале 0–1 столбики
+    # слились бы в полосу, поэтому масштаб по данным
+    top = 1.0 if ds == "ctu13" else max(0.05, 1.15 * max(rates, default=0))
+    ax.set_ylim(0, top)
     _style(ax)
     return _png(fig)
 
@@ -190,7 +193,9 @@ def _collect_audit(data_dir: Path, cfg: DataConfig) -> list[dict]:
         if not path.exists():
             continue
         df = pl.read_parquet(path)
-        flagged = df.filter(pl.col("status") != "ok").sort(["status", "lift"], descending=True)
+        flagged = df.filter(pl.col("status").is_in(["dangerous", "suspicious"])).sort(
+            ["status", "lift"], descending=True
+        )
         top = df.sort("lift", descending=True, nulls_last=True).head(20)
         out.append(
             {
@@ -200,6 +205,7 @@ def _collect_audit(data_dir: Path, cfg: DataConfig) -> list[dict]:
                 "flagged": flagged.to_dicts(),
                 "n_dangerous": int((df["status"] == "dangerous").sum()),
                 "n_suspicious": int((df["status"] == "suspicious").sum()),
+                "not_evaluable": bool(df.height) and bool((df["status"] == "n/a").all()),
                 "chart": _audit_chart(top, cfg) if top.height else None,
             }
         )

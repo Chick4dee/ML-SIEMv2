@@ -68,3 +68,17 @@ def test_stratified_sample_reproducible():
     share_full = (df["label"] == "dos").mean()
     share = (a["label"] == "dos").mean()
     assert abs(share - share_full) < 0.01
+
+
+def test_single_class_val_is_not_evaluable():
+    # val без атак (как unsw_cross_day): любое поле «угадывает» benign идеально —
+    # это не сигнал, а вырожденный случай, и он не должен давать ложные suspicious
+    val = _part(1000, 2).with_columns(pl.lit("benign").alias("label"))
+    res = audit_fields(
+        _part(3000, 1),
+        val,
+        [("src_ip", "identity"), ("bidirectional_packets", "feature")],
+        CFG,
+        seed=42,
+    )
+    assert set(res["status"].to_list()) == {"n/a"}

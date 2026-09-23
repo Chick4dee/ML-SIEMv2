@@ -59,7 +59,9 @@
 {% for a in audits %}
 ### {{ a.name }} (базовая линия {{ a.baseline|f3 }})
 
-{% if a.flagged %}
+{% if a.not_evaluable %}
+Аудит невозможен: в val меньше двух классов.
+{% elif a.flagged %}
 | Поле | Вариант | PR-AUC | Lift | Статус |
 |---|---|---:|---:|---|
 {% for r in a.flagged %}

@@ -1,0 +1,375 @@
+schema: '2.0'
+stages:
+  flows_unsw:
+    cmd: uv run mlsiem data flows --dataset unsw
+    deps:
+    - path: src/mlsiem/data/captures.py
+      hash: md5
+      md5: 41f4c79a3b195e4e07010859d6c6018e
+      size: 11539
+    - path: src/mlsiem/data/extract.py
+      hash: md5
+      md5: 485ada76587d8aa6588bb77c113b1021
+      size: 17496
+    - path: src/mlsiem/data/labeling.py
+      hash: md5
+      md5: feb8fe6ad2212f8c8b2fa103be9f5b56
+      size: 9265
+    - path: src/mlsiem/data/pipeline.py
+      hash: md5
+      md5: c711ef2b6f3e195f53ff07cf12ff38be
+      size: 15308
+    - path: src/mlsiem/data/schema.py
+      hash: md5
+      md5: 4a01f45adfea8672e7f18d5b5fe6412f
+      size: 7174
+    - path: src/mlsiem/data/sources/unsw.py
+      hash: md5
+      md5: b0445524e55b3063878bb72fe824f038
+      size: 2631
+    - path: src/mlsiem/data/taxonomy.py
+      hash: md5
+      md5: 2626f68f2493e34fd10bd1f33ddc432c
+      size: 2830
+    params:
+      configs/data.yaml:
+        datasets.unsw:
+          root: A:/datasets/UNSW-NB15/OneDrive_2_12.06.2026
+          gt_csv: CSV Files/NUSW-NB15_GT.csv
+          pcap_glob: pcap files/pcaps */*.pcap
+    outs:
+    - path: data/flows/unsw
+      hash: md5
+      md5: b4c3d263a6bfefef534f6e8bdc58963b.dir
+      size: 184763685
+      nfiles: 162
+  flows_ctu13:
+    cmd: uv run mlsiem data flows --dataset ctu13
+    deps:
+    - path: src/mlsiem/data/captures.py
+      hash: md5
+      md5: 41f4c79a3b195e4e07010859d6c6018e
+      size: 11539
+    - path: src/mlsiem/data/extract.py
+      hash: md5
+      md5: 485ada76587d8aa6588bb77c113b1021
+      size: 17496
+    - path: src/mlsiem/data/labeling.py
+      hash: md5
+      md5: feb8fe6ad2212f8c8b2fa103be9f5b56
+      size: 9265
+    - path: src/mlsiem/data/pipeline.py
+      hash: md5
+      md5: c711ef2b6f3e195f53ff07cf12ff38be
+      size: 15308
+    - path: src/mlsiem/data/schema.py
+      hash: md5
+      md5: 4a01f45adfea8672e7f18d5b5fe6412f
+      size: 7174
+    - path: src/mlsiem/data/sources/ctu13.py
+      hash: md5
+      md5: 40e066830175129af2b45cc464f7d9a4
+      size: 5075
+    - path: src/mlsiem/data/taxonomy.py
+      hash: md5
+      md5: 2626f68f2493e34fd10bd1f33ddc432c
+      size: 2830
+    params:
+      configs/data.yaml:
+        datasets.ctu13:
+          root: A:/datasets/CTU-13/CTU-13-Dataset
+          timezone: Europe/Prague
+    outs:
+    - path: data/flows/ctu13
+      hash: md5
+      md5: 75f628d4c57182825c2bfaa94056e5a2.dir
+      size: 16627939
+      nfiles: 28
+  split@unsw_time:
+    cmd: uv run mlsiem data split --name unsw_time
+    deps:
+    - path: data/flows/unsw
+      hash: md5
+      md5: b4c3d263a6bfefef534f6e8bdc58963b.dir
+      size: 184763685
+      nfiles: 162
+    - path: src/mlsiem/data/split.py
+      hash: md5
+      md5: 39536b14a2196b72b846c846a3320799
+      size: 15142
+    params:
+      configs/data.yaml:
+        split:
+          quantiles:
+          - 0.7
+          - 0.85
+          gap_ms: 600000
+          ctu13_parts:
+            train:
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+            - 9
+            - 13
+            val:
+            - 7
+            - 10
+            - 11
+            test:
+            - 8
+            - 12
+    outs:
+    - path: data/splits/unsw_time.json
+      hash: md5
+      md5: 3f16011c6693d6c1726967e46f24f5bb
+      size: 10579
+    - path: data/splits/unsw_time.parquet
+      hash: md5
+      md5: b4edf94a088781015384864f136f1ca9
+      size: 956645
+  split@unsw_cross_day:
+    cmd: uv run mlsiem data split --name unsw_cross_day
+    deps:
+    - path: data/flows/unsw
+      hash: md5
+      md5: b4c3d263a6bfefef534f6e8bdc58963b.dir
+      size: 184763685
+      nfiles: 162
+    - path: src/mlsiem/data/split.py
+      hash: md5
+      md5: 39536b14a2196b72b846c846a3320799
+      size: 15142
+    params:
+      configs/data.yaml:
+        split:
+          quantiles:
+          - 0.7
+          - 0.85
+          gap_ms: 600000
+          ctu13_parts:
+            train:
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+            - 9
+            - 13
+            val:
+            - 7
+            - 10
+            - 11
+            test:
+            - 8
+            - 12
+    outs:
+    - path: data/splits/unsw_cross_day.json
+      hash: md5
+      md5: 6b86ed28180364c38ebdba07cc0f8238
+      size: 9861
+    - path: data/splits/unsw_cross_day.parquet
+      hash: md5
+      md5: 42619def41ee22d658550cac1fbee6a2
+      size: 980785
+  split@ctu13_scenario:
+    cmd: uv run mlsiem data split --name ctu13_scenario
+    deps:
+    - path: data/flows/ctu13
+      hash: md5
+      md5: 75f628d4c57182825c2bfaa94056e5a2.dir
+      size: 16627939
+      nfiles: 28
+    - path: src/mlsiem/data/split.py
+      hash: md5
+      md5: 39536b14a2196b72b846c846a3320799
+      size: 15142
+    params:
+      configs/data.yaml:
+        split:
+          quantiles:
+          - 0.7
+          - 0.85
+          gap_ms: 600000
+          ctu13_parts:
+            train:
+            - 1
+            - 2
+            - 3
+            - 4
+            - 5
+            - 6
+            - 9
+            - 13
+            val:
+            - 7
+            - 10
+            - 11
+            test:
+            - 8
+            - 12
+    outs:
+    - path: data/splits/ctu13_scenario.json
+      hash: md5
+      md5: 0478fc9eba2259cca01ad08b3005de1a
+      size: 3016
+    - path: data/splits/ctu13_scenario.parquet
+      hash: md5
+      md5: 2264f01b86297918d5be3de0dadbcd39
+      size: 121882
+  audit@unsw_time:
+    cmd: uv run mlsiem data audit --split unsw_time
+    deps:
+    - path: data/flows/unsw
+      hash: md5
+      md5: b4c3d263a6bfefef534f6e8bdc58963b.dir
+      size: 184763685
+      nfiles: 162
+    - path: data/splits/unsw_time.parquet
+      hash: md5
+      md5: b4edf94a088781015384864f136f1ca9
+      size: 956645
+    - path: src/mlsiem/data/audit.py
+      hash: md5
+      md5: 9fdb94d3e81ec1ea5470681a0c44c064
+      size: 9133
+    params:
+      configs/data.yaml:
+        audit:
+          sample_per_part: 500000
+          tree_depth: 4
+          dangerous_lift: 0.1
+          suspicious_pr_auc: 0.9
+        seed: 42
+    outs:
+    - path: data/audit/unsw_time.parquet
+      hash: md5
+      md5: 5edb75370e387afe400a4c76692d4c33
+      size: 4263
+  audit@unsw_cross_day:
+    cmd: uv run mlsiem data audit --split unsw_cross_day
+    deps:
+    - path: data/flows/unsw
+      hash: md5
+      md5: b4c3d263a6bfefef534f6e8bdc58963b.dir
+      size: 184763685
+      nfiles: 162
+    - path: data/splits/unsw_cross_day.parquet
+      hash: md5
+      md5: 42619def41ee22d658550cac1fbee6a2
+      size: 980785
+    - path: src/mlsiem/data/audit.py
+      hash: md5
+      md5: 9fdb94d3e81ec1ea5470681a0c44c064
+      size: 9133
+    params:
+      configs/data.yaml:
+        audit:
+          sample_per_part: 500000
+          tree_depth: 4
+          dangerous_lift: 0.1
+          suspicious_pr_auc: 0.9
+        seed: 42
+    outs:
+    - path: data/audit/unsw_cross_day.parquet
+      hash: md5
+      md5: 5326159f90a5094defb783089dd457b2
+      size: 2965
+  audit@ctu13_scenario:
+    cmd: uv run mlsiem data audit --split ctu13_scenario
+    deps:
+    - path: data/flows/ctu13
+      hash: md5
+      md5: 75f628d4c57182825c2bfaa94056e5a2.dir
+      size: 16627939
+      nfiles: 28
+    - path: data/splits/ctu13_scenario.parquet
+      hash: md5
+      md5: 2264f01b86297918d5be3de0dadbcd39
+      size: 121882
+    - path: src/mlsiem/data/audit.py
+      hash: md5
+      md5: 9fdb94d3e81ec1ea5470681a0c44c064
+      size: 9133
+    params:
+      configs/data.yaml:
+        audit:
+          sample_per_part: 500000
+          tree_depth: 4
+          dangerous_lift: 0.1
+          suspicious_pr_auc: 0.9
+        seed: 42
+    outs:
+    - path: data/audit/ctu13_scenario.parquet
+      hash: md5
+      md5: 23b97625e8fdc2703a3b56c34e945292
+      size: 4357
+  compare_v1:
+    cmd: uv run mlsiem data compare-v1
+    deps:
+    - path: configs/v1_diff_notes.yaml
+      hash: md5
+      md5: a2194f486294f5fb300e77924bab8297
+      size: 490
+    - path: data/flows/ctu13/summary.csv
+      hash: md5
+      md5: 2708c0a896574c1d089bacc3ea21d8b2
+      size: 794
+    - path: data/flows/unsw/summary.csv
+      hash: md5
+      md5: f0fe5be28077ab9d9a3ad427c4fb728f
+      size: 6130
+    - path: src/mlsiem/data/compare_v1.py
+      hash: md5
+      md5: 9b11582b74fff1e0f9724689f18c7806
+      size: 9002
+    params:
+      configs/data.yaml:
+        v1_processed_dir: F:/GitHubRepos/ML-SIEM/data/processed
+    outs:
+    - path: data/compare_v1.csv
+      hash: md5
+      md5: dd495e2dbbe0e7319e827c5c6a784384
+      size: 34661
+  report:
+    cmd: uv run mlsiem data report --output reports
+    deps:
+    - path: data/audit
+      hash: md5
+      md5: d71bf7017810efaf0275c172be9aae19.dir
+      size: 11585
+      nfiles: 3
+    - path: data/compare_v1.csv
+      hash: md5
+      md5: dd495e2dbbe0e7319e827c5c6a784384
+      size: 34661
+    - path: data/flows/ctu13/summary.csv
+      hash: md5
+      md5: 2708c0a896574c1d089bacc3ea21d8b2
+      size: 794
+    - path: data/flows/unsw/summary.csv
+      hash: md5
+      md5: f0fe5be28077ab9d9a3ad427c4fb728f
+      size: 6130
+    - path: data/splits
+      hash: md5
+      md5: 7da12bf25b856f185b632ea342c60d3b.dir
+      size: 2082768
+      nfiles: 6
+    - path: src/mlsiem/data/report
+      hash: md5
+      md5: 27b993814abc854e8d76be4ed8f00124.dir
+      size: 54856
+      nfiles: 6
+    outs:
+    - path: reports/data_quality.html
+      hash: md5
+      md5: 6df9869c309006993b8f180f84bb9ca4
+      size: 311790
+    - path: reports/data_quality.md
+      hash: md5
+      md5: e9dfbebaf2d0313d6b791ed827db298f
+      size: 6168

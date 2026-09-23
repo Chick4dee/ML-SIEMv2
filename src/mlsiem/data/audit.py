@@ -97,7 +97,12 @@ def audit_fields(
     y_train = train["label"].to_numpy()
     y_val = val["label"].to_numpy()
     val_classes = [c for c in classes if (y_val == c).any()]
-    baseline = float(np.mean([(y_val == c).mean() for c in val_classes])) if val_classes else 0.0
+    # Если в val меньше двух классов, любое поле «угадывает» его идеально (PR-AUC = база = 1):
+    # оценивать нечего, и честный ответ — n/a, а не десятки ложных suspicious
+    evaluable = len(val_classes) >= 2 and len(classes) >= 2
+    baseline = (
+        float(np.mean([(y_val == c).mean() for c in val_classes])) if evaluable else float("nan")
+    )
 
     rows = []
     for name, group in fields:
@@ -105,7 +110,7 @@ def audit_fields(
         if name in IP_FIELDS:
             variants.append(("subnet24", _subnet24(train[name]), _subnet24(val[name])))
         for variant, s_train, s_val in variants:
-            if not val_classes or len(classes) < 2:
+            if not evaluable:
                 score = float("nan")
             else:
                 x_train, x_val = _encode(s_train, s_val)
@@ -113,7 +118,9 @@ def audit_fields(
                 tree.fit(x_train, y_train)
                 score = pr_auc_macro(y_val, tree.predict_proba(x_val), list(tree.classes_))
             lift = score - baseline
-            if group in LEAKY_GROUPS and lift >= cfg.dangerous_lift:
+            if not evaluable:
+                status = "n/a"
+            elif group in LEAKY_GROUPS and lift >= cfg.dangerous_lift:
                 status = "dangerous"
             elif group == "feature" and score >= cfg.suspicious_pr_auc:
                 status = "suspicious"

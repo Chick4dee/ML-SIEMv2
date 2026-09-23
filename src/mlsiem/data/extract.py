@@ -157,8 +157,10 @@ def _check_pcap_tail(f, size: int, endian: str, snaplen: int, name: str) -> list
                 break
             if pos + 16 + incl > end:
                 if n >= TAIL_MIN_CHAIN:
-                    return [f"{name}: файл обрывается внутри последнего пакета "
-                            f"(смещение {start + pos}); прочитаны пакеты до обрыва"]
+                    return [
+                        f"{name}: файл обрывается внутри последнего пакета "
+                        f"(смещение {start + pos}); прочитаны пакеты до обрыва"
+                    ]
                 break
             pos += 16 + incl
             n += 1
@@ -166,8 +168,10 @@ def _check_pcap_tail(f, size: int, endian: str, snaplen: int, name: str) -> list
             if n >= TAIL_MIN_CHAIN:
                 if pos == end:
                     return []
-                return [f"{name}: файл обрывается в заголовке последнего пакета "
-                        f"(смещение {start + pos}); прочитаны пакеты до обрыва"]
+                return [
+                    f"{name}: файл обрывается в заголовке последнего пакета "
+                    f"(смещение {start + pos}); прочитаны пакеты до обрыва"
+                ]
     return [f"{name}: хвост файла не разобран, целостность не проверена"]
 
 
