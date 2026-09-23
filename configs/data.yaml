@@ -1,0 +1,31 @@
+# Конфигурация пайплайна данных (фича 001). Пути к датасетам живут только здесь —
+# в коде их нет, чтобы проект можно было перенести на другую машину правкой одного файла.
+datasets:
+  unsw:
+    root: "A:/datasets/UNSW-NB15/OneDrive_2_12.06.2026"
+    # Пути ниже — относительно root
+    gt_csv: "CSV Files/NUSW-NB15_GT.csv"
+    pcap_glob: "pcap files/pcaps */*.pcap"
+  ctu13:
+    root: "A:/datasets/CTU-13/CTU-13-Dataset"
+    # Время в .binetflow записано по часам стенда в Праге, а PCAP — в UTC
+    timezone: "Europe/Prague"
+
+# Готовые таблицы v1 — только для сверки (compare-v1), читаются, но не меняются
+v1_processed_dir: "F:/GitHubRepos/ML-SIEM/data/processed"
+
+split:
+  # Границы train/val/test внутри дня UNSW — по квантилям числа потоков
+  quantiles: [0.70, 0.85]
+  # Зазор ±10 минут вокруг границ: больше idle_timeout (2 мин) и типичной сессии атаки
+  gap_ms: 600000
+  # Сценарии CTU-13 по частям: Murlo (8) и NSIS.ay (12) в train не встречаются
+  ctu13_parts: {train: [1, 2, 3, 4, 5, 6, 9, 13], val: [7, 10, 11], test: [8, 12]}
+
+audit:
+  sample_per_part: 500000
+  tree_depth: 4
+  dangerous_lift: 0.10
+  suspicious_pr_auc: 0.90
+
+seed: 42

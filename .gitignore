@@ -9,3 +9,20 @@ __pycache__/
 # IDE
 .idea/
 .vscode/
+
+# Данные и отчёты — только через DVC (в git лишь .gitignore и *.dvc)
+/data/*
+!/data/.gitignore
+!/data/*.dvc
+/reports/*
+/tmp/
+.dvc/cache
+.dvc/tmp
+
+# Сырые захваты и бинарники: PCAP большие, а *.exe в папках CTU-13 — настоящая малварь
+*.exe
+*.parquet
+*.pcap
+*.pcapng
+!tests/fixtures/*.pcap
+!tests/fixtures/*.pcapng

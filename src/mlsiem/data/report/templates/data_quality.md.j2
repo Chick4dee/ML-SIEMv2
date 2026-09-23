@@ -1,0 +1,93 @@
+# Качество данных NIDS
+
+Собран {{ generated }} · схема признаков {{ schema_version }} · правила разметки {{ labeling_version }}.
+Подробный отчёт с графиками — `data_quality.html` рядом.
+
+## Обзор
+
+{% if not datasets %}
+Потоки ещё не извлечены.
+{% endif %}
+{% for ds in datasets.values() %}
+**{{ ds.title }}**: захватов {{ ds.n_done }}/{{ ds.n_captures }}, потоков {{ ds.n_flows|num }}, сопоставлено {{ ds.match_rate|pct }}, пик памяти {{ ds.peak_rss_mb|num }} МБ.
+
+| Класс | Потоков | Доля |
+|---|---:|---:|
+{% for c, n in ds.class_totals.items() %}
+| {{ c }} | {{ n|num }} | {{ (n / ds.n_flows if ds.n_flows else None)|pct(2) }} |
+{% endfor %}
+
+{% endfor %}
+## Сопоставление по захватам
+
+{% for ds in datasets.values() %}
+- {{ ds.title }}: ошибок {{ ds.n_failed }}, предупреждений экстрактора {{ ds.warnings|length }}.
+{% endfor %}
+
+## Классы по частям разбиения
+
+{% if not splits %}
+Разбиения ещё не построены.
+{% endif %}
+{% for s in splits %}
+### {{ s.name }} ({{ s.dataset }}, hash `{{ s.hash }}`)
+
+| Класс |{% for p in parts %} {{ p }} |{% endfor %} исключено |
+|---|{% for p in parts %}---:|{% endfor %}---:|
+{% for r in s.classes %}
+| {{ r["class"] }} |{% for p in parts %} {{ r[p]|num }} |{% endfor %} {{ r.excluded|num }} |
+{% endfor %}
+
+{% for p in parts %}{% if s.missing[p] %}
+- В части **{{ p }}** нет классов: {{ s.missing[p]|join(", ") }}.
+{% endif %}{% endfor %}
+{% endfor %}
+
+## Исключено зазором
+
+{% for s in splits %}
+- {{ s.name }}: {{ s.excluded.total|num }} потоков.
+{% endfor %}
+
+## Аудит артефактов
+
+Порог dangerous: lift ≥ {{ audit_cfg.dangerous_lift }}; suspicious: PR-AUC ≥ {{ audit_cfg.suspicious_pr_auc }}.
+
+{% if not audits %}
+Аудит ещё не запускался.
+{% endif %}
+{% for a in audits %}
+### {{ a.name }} (базовая линия {{ a.baseline|f3 }})
+
+{% if a.flagged %}
+| Поле | Вариант | PR-AUC | Lift | Статус |
+|---|---|---:|---:|---|
+{% for r in a.flagged %}
+| {{ r.field }} | {{ r.variant }} | {{ r.pr_auc_macro|f3 }} | {{ r.lift|f3 }} | {{ r.status }} |
+{% endfor %}
+{% else %}
+Опасных и подозрительных полей нет.
+{% endif %}
+
+{% endfor %}
+## Сверка с v1
+
+{% if not compare %}
+Сверка не выполнялась.
+{% else %}
+Необъяснённых расхождений: **{{ compare.n_unexplained }}**.
+
+{% if compare.ctu13 %}
+| Сценарий CTU-13 | Сопоставлено v1 | Сопоставлено v2 |
+|---|---:|---:|
+{% for r in compare.ctu13 %}
+| {{ r.capture_id }} | {{ r.match_rate_v1|pct }} | {{ r.match_rate_v2|pct }} |
+{% endfor %}
+{% endif %}
+{% endif %}
+
+## Известные ограничения источников
+
+- CTU-13: нормального трафика почти нет (benign ≈ 0); background — не benign; несопоставленное — unlabeled.
+- UNSW-NB15: benign — фон генератора IXIA, атаки — другой модуль того же стенда; риск выучить генератор.
+- Метки переносятся с потоков Argus на потоки nfstream по 5-кортежу и времени с допуском 60 с.

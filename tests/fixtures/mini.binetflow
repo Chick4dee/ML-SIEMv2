@@ -1,0 +1,5 @@
+StartTime,Dur,Proto,SrcAddr,Sport,Dir,DstAddr,Dport,State,sTos,dTos,TotPkts,TotBytes,SrcBytes,Label
+2015/01/22 11:00:00.000000,0.080000,tcp,10.0.0.1,40001,   ->,10.0.0.100,80,FSPA_FSPA,0,0,8,475,289,flow=From-Botnet-V42-TCP-HTTP-Google-Net-Established-6
+2015/01/22 11:00:01.000000,0.020000,udp,10.0.0.2,50001,  <->,10.0.0.53,53,CON,0,0,2,150,75,flow=From-Normal-V42-UDP-CVUT-DNS-Server
+2015/01/22 11:00:02.000000,2.005000,icmp,10.0.0.100,0x0000,  <->,10.0.0.3,0x0001,ECO,0,0,6,252,126,flow=Background
+2011/08/16 13:52:03.078339,2.925519,tcp,147.32.86.58,3184,   ->,77.75.73.9,80,SR_A,0,0,3,182,122,flow=Background-TCP-Attempt

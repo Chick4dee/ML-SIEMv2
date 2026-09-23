@@ -1,0 +1,102 @@
+# Конвейер данных фичи 001: flows → split → audit → compare_v1 → report.
+# Весь конвейер: `uv run mlsiem data all` (это `dvc repro`); DVC перезапускает только те
+# стадии, у которых поменялись зависимости.
+#
+# Сырые PCAP (~100 ГБ) в deps не указаны намеренно: DVC хешировал бы их при каждой проверке.
+# Их изменения ловят отпечатки в манифестах захватов — стадия flows сама пересчитает
+# только изменившиеся захваты (для этого outs помечены persist: DVC не удаляет готовое).
+stages:
+  flows_unsw:
+    cmd: uv run mlsiem data flows --dataset unsw
+    deps:
+      - src/mlsiem/data/extract.py
+      - src/mlsiem/data/labeling.py
+      - src/mlsiem/data/pipeline.py
+      - src/mlsiem/data/captures.py
+      - src/mlsiem/data/schema.py
+      - src/mlsiem/data/taxonomy.py
+      - src/mlsiem/data/sources/unsw.py
+    params:
+      - configs/data.yaml:
+          - datasets.unsw
+    outs:
+      - data/flows/unsw:
+          persist: true
+
+  flows_ctu13:
+    cmd: uv run mlsiem data flows --dataset ctu13
+    deps:
+      - src/mlsiem/data/extract.py
+      - src/mlsiem/data/labeling.py
+      - src/mlsiem/data/pipeline.py
+      - src/mlsiem/data/captures.py
+      - src/mlsiem/data/schema.py
+      - src/mlsiem/data/taxonomy.py
+      - src/mlsiem/data/sources/ctu13.py
+    params:
+      - configs/data.yaml:
+          - datasets.ctu13
+    outs:
+      - data/flows/ctu13:
+          persist: true
+
+  split:
+    foreach:
+      unsw_time: unsw
+      unsw_cross_day: unsw
+      ctu13_scenario: ctu13
+    do:
+      cmd: uv run mlsiem data split --name ${key}
+      deps:
+        - data/flows/${item}
+        - src/mlsiem/data/split.py
+      params:
+        - configs/data.yaml:
+            - split
+      outs:
+        - data/splits/${key}.json
+        - data/splits/${key}.parquet
+
+  audit:
+    foreach:
+      unsw_time: unsw
+      unsw_cross_day: unsw
+      ctu13_scenario: ctu13
+    do:
+      cmd: uv run mlsiem data audit --split ${key}
+      deps:
+        - data/flows/${item}
+        - data/splits/${key}.parquet
+        - src/mlsiem/data/audit.py
+      params:
+        - configs/data.yaml:
+            - audit
+            - seed
+      outs:
+        - data/audit/${key}.parquet
+
+  compare_v1:
+    cmd: uv run mlsiem data compare-v1
+    deps:
+      - data/flows/unsw/summary.csv
+      - data/flows/ctu13/summary.csv
+      - src/mlsiem/data/compare_v1.py
+      - configs/v1_diff_notes.yaml
+    params:
+      - configs/data.yaml:
+          - v1_processed_dir
+    outs:
+      - data/compare_v1.csv
+
+  report:
+    cmd: uv run mlsiem data report --output reports
+    deps:
+      - data/flows/unsw/summary.csv
+      - data/flows/ctu13/summary.csv
+      - data/splits
+      - data/audit
+      - data/compare_v1.csv
+      - src/mlsiem/data/report
+    outs:
+      - reports/data_quality.html
+      - reports/data_quality.md

@@ -1,0 +1,4 @@
+[core]
+    remote = local
+['remote "local"']
+    url = A:/dvc-remote-v2

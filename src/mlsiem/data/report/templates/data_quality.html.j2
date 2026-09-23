@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Качество данных NIDS</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --line: #d8dee4; --card: #f6f8fa;
+    --accent: #2563eb; --bad: #c2410c; --warn: #b45309; --ok: #15803d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --line: #30363d; --card: #161b22;
+      --accent: #60a5fa; --bad: #fb923c; --warn: #fbbf24; --ok: #4ade80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 40px 0 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 16px; margin: 24px 0 8px; }
+  p, li { max-width: 78ch; }
+  .muted { color: var(--muted); font-size: 13px; }
+  nav { margin: 16px 0 8px; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 14px; }
+  a { color: var(--accent); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px;
+           margin: 12px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .card .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .k { color: var(--muted); font-size: 12px; }
+  .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 8px 0 16px; }
+  table { border-collapse: collapse; font-size: 13px; min-width: 100%; }
+  th, td { padding: 5px 9px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; background: var(--card); position: sticky; top: 0; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  td.wrap { white-space: normal; min-width: 220px; }
+  .tag { display: inline-block; padding: 0 7px; border-radius: 10px; font-size: 12px; font-weight: 600;
+         border: 1px solid currentColor; }
+  .dangerous, .failed { color: var(--bad); }
+  .suspicious { color: var(--warn); }
+  .ok, .done { color: var(--ok); }
+  img { max-width: 100%; height: auto; display: block; margin: 8px 0; }
+  code { font-size: 12.5px; background: var(--card); padding: 1px 5px; border-radius: 4px; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+<h1>Качество данных NIDS</h1>
+<div class="muted">Собран {{ generated }} · схема признаков {{ schema_version }} ·
+  правила разметки {{ labeling_version }} · экстрактор {{ extractor.library }}</div>
+<nav>
+  <a href="#overview">Обзор</a><a href="#matching">Сопоставление</a><a href="#splits">Разбиения</a>
+  <a href="#gap">Исключено зазором</a><a href="#audit">Аудит артефактов</a>
+  <a href="#v1">Сверка с v1</a><a href="#limits">Ограничения</a>
+</nav>
+
+<h2 id="overview">Обзор</h2>
+{% if not datasets %}
+<p>Потоки ещё не извлечены — запустите <code>mlsiem data flows</code>.</p>
+{% endif %}
+{% for ds in datasets.values() %}
+<h3>{{ ds.title }}</h3>
+<div class="cards">
+  <div class="card"><div class="v">{{ ds.n_done }} / {{ ds.n_captures }}</div><div class="k">захватов готово</div></div>
+  <div class="card"><div class="v">{{ ds.n_flows|num }}</div><div class="k">потоков</div></div>
+  <div class="card"><div class="v">{{ ds.match_rate|pct }}</div><div class="k">сопоставлено с разметкой</div></div>
+  <div class="card"><div class="v">{{ ds.peak_rss_mb|num }} МБ</div><div class="k">пик памяти (макс. по захватам)</div></div>
+</div>
+<div class="scroll"><table>
+  <tr><th>Класс</th><th>Потоков</th><th>Доля</th></tr>
+  {% for c, n in ds.class_totals.items() %}
+  <tr><td>{{ c }}</td><td class="n">{{ n|num }}</td><td class="n">{{ (n / ds.n_flows if ds.n_flows else None)|pct(2) }}</td></tr>
+  {% endfor %}
+</table></div>
+<p class="muted">Версии схемы в файлах: {{ ds.schema_versions|join(", ") }};
+  версии разметки: {{ ds.labeling_versions|join(", ") }}.
+  {% if ds.n_failed %}<span class="failed">Захватов с ошибкой: {{ ds.n_failed }}.</span>{% endif %}</p>
+{% endfor %}
+
+<h2 id="matching">Сопоставление по захватам</h2>
+<p>Для CTU-13 «сопоставлено» — поток нашёл запись в <code>.binetflow</code>, остальные — <code>unlabeled</code>.
+  Для UNSW-NB15 разметка перечисляет только атаки, поэтому здесь это фактически доля атак,
+  а несопоставленное — <code>benign</code>.</p>
+{% for ds in datasets.values() %}
+<h3>{{ ds.title }}</h3>
+{% if ds.chart %}<img src="{{ ds.chart }}" alt="Доля сопоставления по захватам {{ ds.title }}">{% endif %}
+<details><summary>Таблица по захватам ({{ ds.rows|length }})</summary>
+<div class="scroll"><table>
+  <tr><th>capture_id</th><th>Статус</th><th>Потоков</th><th>Сопоставлено</th><th>Доля</th><th>Пик, МБ</th><th>content_hash</th><th>Ошибка</th></tr>
+  {% for r in ds.rows %}
+  <tr><td>{{ r.capture_id }}</td><td class="{{ r.status }}">{{ r.status }}</td>
+    <td class="n">{{ r.n_flows|num }}</td><td class="n">{{ r.n_matched|num }}</td>
+    <td class="n">{{ r.match_rate|pct }}</td><td class="n">{{ r.peak_rss_mb|num }}</td>
+    <td><code>{{ r.content_hash }}</code></td><td class="wrap">{{ r.error or "" }}</td></tr>
+  {% endfor %}
+</table></div></details>
+{% if ds.warnings %}
+<p class="suspicious">Предупреждения экстрактора:</p>
+<ul>{% for cid, w in ds.warnings %}<li><code>{{ cid }}</code>: {{ w }}</li>{% endfor %}</ul>
+{% endif %}
+{% endfor %}
+
+<h2 id="splits">Классы по частям разбиения</h2>
+{% if not splits %}<p>Разбиения ещё не построены — <code>mlsiem data split</code>.</p>{% endif %}
+{% for s in splits %}
+<h3>{{ s.name }} <span class="muted">({{ s.dataset }}, hash <code>{{ s.hash }}</code>)</span></h3>
+<div class="cards">
+  {% for p in parts %}
+  <div class="card"><div class="v">{{ s.parts[p].n_flows|num }}</div><div class="k">{{ p }} · {{ s.parts[p].groups|join(", ") }}</div></div>
+  {% endfor %}
+</div>
+{% if s.chart %}<img src="{{ s.chart }}" alt="Классы по частям {{ s.name }}">{% endif %}
+<div class="scroll"><table>
+  <tr><th>Класс</th>{% for p in parts %}<th>{{ p }}</th>{% endfor %}<th>исключено</th></tr>
+  {% for r in s.classes %}
+  <tr><td>{{ r["class"] }}</td>{% for p in parts %}<td class="n">{{ r[p]|num }}</td>{% endfor %}<td class="n">{{ r.excluded|num }}</td></tr>
+  {% endfor %}
+</table></div>
+{% for p in parts %}{% if s.missing[p] %}
+<p class="suspicious">В части <b>{{ p }}</b> нет классов: {{ s.missing[p]|join(", ") }}.</p>
+{% endif %}{% endfor %}
+{% if s.parts.test.new_families %}
+<p class="muted">Семейства в test, которых нет в train: {{ s.parts.test.new_families|join(", ") }}.</p>
+{% endif %}
+{% endfor %}
+
+<h2 id="gap">Исключено зазором</h2>
+<p>Вокруг каждой временной границы — зона ±{{ ((splits[0].params.gap_ms if splits else 600000) / 60000)|int }} мин.
+  Поток, задевающий её, не входит ни в одну часть: иначе куски одной сессии попали бы и в train, и в test.</p>
+{% for s in splits %}
+<p><b>{{ s.name }}</b>: {{ s.excluded.total|num }} потоков
+  {% if s.excluded.by_label %}({% for c, n in s.excluded.by_label.items() %}{{ c }} {{ n|num }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}.</p>
+{% endfor %}
+
+<h2 id="audit">Аудит артефактов</h2>
+<p>Для каждого поля — дерево глубины {{ audit_cfg.tree_depth }} только на этом поле: обучение на train,
+  macro PR-AUC на val. Базовая линия — PR-AUC угадывания по доле классов.
+  <b class="dangerous">dangerous</b> — служебное поле (IP, порт, время, MAC, DPI) с приростом над базовой линией ≥ {{ audit_cfg.dangerous_lift }};
+  <b class="suspicious">suspicious</b> — поведенческий признак с PR-AUC ≥ {{ audit_cfg.suspicious_pr_auc }} (нужен ручной разбор).
+  Выборка — до {{ audit_cfg.sample_per_part|num }} потоков на часть.</p>
+{% if not audits %}<p>Аудит ещё не запускался — <code>mlsiem data audit</code>.</p>{% endif %}
+{% for a in audits %}
+<h3>{{ a.name }} <span class="muted">— полей {{ a.n_fields }}, базовая линия {{ a.baseline|f3 }},
+  dangerous {{ a.n_dangerous }}, suspicious {{ a.n_suspicious }}</span></h3>
+{% if a.chart %}<img src="{{ a.chart }}" alt="Прирост над базовой линией по полям {{ a.name }}">{% endif %}
+{% if a.flagged %}
+<div class="scroll"><table>
+  <tr><th>Поле</th><th>Группа</th><th>Вариант</th><th>PR-AUC</th><th>База</th><th>Lift</th><th>Статус</th></tr>
+  {% for r in a.flagged %}
+  <tr><td>{{ r.field }}</td><td>{{ r.group }}</td><td>{{ r.variant }}</td>
+    <td class="n">{{ r.pr_auc_macro|f3 }}</td><td class="n">{{ r.baseline|f3 }}</td>
+    <td class="n">{{ r.lift|f3 }}</td><td><span class="tag {{ r.status }}">{{ r.status }}</span></td></tr>
+  {% endfor %}
+</table></div>
+{% else %}<p class="ok">Опасных и подозрительных полей нет.</p>{% endif %}
+{% endfor %}
+
+<h2 id="v1">Сверка с v1</h2>
+{% if not compare %}
+<p>Сверка не выполнялась — запустите <code>mlsiem data compare-v1</code>.</p>
+{% else %}
+<p>Необъяснённых расхождений: <b class="{{ 'failed' if compare.n_unexplained else 'ok' }}">{{ compare.n_unexplained }}</b>.
+  Пороги: число потоков &gt; 5%, доля класса &gt; 5 п. п., снижение доли сопоставления CTU-13.
+  Объяснения — в <code>configs/v1_diff_notes.yaml</code>.</p>
+{% if compare.ctu13 %}
+<h3>Доля сопоставления CTU-13: v1 и v2</h3>
+<div class="scroll"><table>
+  <tr><th>Сценарий</th><th>Потоков v1</th><th>Потоков v2</th><th>Сопоставлено v1</th><th>Сопоставлено v2</th></tr>
+  {% for r in compare.ctu13 %}
+  <tr><td>{{ r.capture_id }}</td><td class="n">{{ r.n_flows_v1|num }}</td><td class="n">{{ r.n_flows_v2|num }}</td>
+    <td class="n">{{ r.match_rate_v1|pct }}</td><td class="n">{{ r.match_rate_v2|pct }}</td></tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+<details><summary>Все захваты ({{ compare.rows|length }})</summary>
+<div class="scroll"><table>
+  <tr><th>capture_id</th><th>Потоков v1</th><th>Потоков v2</th><th>Разница</th><th>Макс. Δ доли, п. п.</th><th>Расхождение</th><th>Объяснение</th></tr>
+  {% for r in compare.rows %}
+  <tr><td>{{ r.capture_id }}</td><td class="n">{{ r.n_flows_v1|num }}</td><td class="n">{{ r.n_flows_v2|num }}</td>
+    <td class="n">{{ r.rel_diff|pct }}</td><td class="n">{{ "%.2f"|format(r.max_class_share_diff_pp) if r.max_class_share_diff_pp is not none else "—" }}</td>
+    <td class="wrap {{ 'failed' if r.reasons and not r.explained else '' }}">{{ r.reasons|join("; ") }}</td>
+    <td class="wrap">{{ r.explained }}</td></tr>
+  {% endfor %}
+</table></div></details>
+{% endif %}
+
+<h2 id="limits">Известные ограничения источников</h2>
+<ul>
+  <li><b>CTU-13</b>: в PCAP датасета лежит только трафик заражённых машин, поэтому нормального
+    трафика почти нет (<code>benign</code> ≈ 0). <code>background</code> — непроверенный фон сети
+    университета, это <b>не</b> то же самое, что <code>benign</code>. Несопоставленные потоки —
+    <code>unlabeled</code>, их нельзя считать ни нормой, ни атакой.</li>
+  <li><b>UNSW-NB15</b>: <code>benign</code> — это фон генератора IXIA, а атаки сгенерированы другим
+    модулем того же стенда. Модель может выучить «почерк генератора» вместо атаки — поэтому
+    аудит артефактов обязателен, а IP-адреса стенда (175.45.176.0/24 у атакующих) в модель
+    не подаются.</li>
+  <li>Метки переносятся с потоков Argus на потоки nfstream по 5-кортежу и времени с допуском
+    60 с; часть потоков неизбежно остаётся без пары или получает метку соседней сессии.</li>
+  <li>Датасеты CTU-13 и UNSW-NB15 не смешиваются: иначе модель научилась бы отличать датасеты,
+    а не атаки.</li>
+</ul>
+</main>
+</body>
+</html>
