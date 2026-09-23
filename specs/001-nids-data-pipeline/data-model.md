@@ -17,11 +17,16 @@
 
 **Переходы статуса**: `pending` → `done` (результат записан атомарно);
 `pending` → `failed` (ошибка чтения/нехватка ресурсов, причина в манифесте);
-`done` → `pending`, если изменился отпечаток входа, версия схемы или версия правил разметки.
+`done` → `pending`, если изменился отпечаток PCAP, отпечаток файла разметки, хеш параметров
+разметки (`timezone`, допуск, метка по умолчанию), версия схемы или версия правил разметки.
+Файл разметки и параметры тоже входы: без них исправление часового пояса в конфиге
+не привело бы к пересчёту, и старые неверные метки остались бы молча.
 
 **Манифест захвата** (`data/flows/<source>/<capture_id>.json`): `capture_id`, `fingerprint`,
-`schema_version`, `labeling_version`, `n_flows`, `n_matched`, `label_counts`,
-`content_hash`, `warnings[]`, `started_at`, `finished_at`, `status`, `error`.
+`label_source_fingerprint`, `labeling_params_hash`, `schema_version`, `labeling_version`,
+`n_flows`, `n_matched`, `label_counts`, `content_hash`, `warnings[]`, `peak_rss_mb`
+(пик памяти процесса вместе с дочерними процессами nfstream), `started_at`,
+`finished_at`, `status`, `error`.
 
 ## Flow (поток)
 
@@ -113,5 +118,10 @@
 ## V1Comparison (сверка с v1)
 
 Строка на захват: `capture_id`, `n_flows_v1`, `n_flows_v2`, `rel_diff`,
-доли классов v1/v2, `explained` (текст объяснения, обязателен при `rel_diff > 0.05`).
+доли классов v1/v2, `max_class_share_diff_pp` (наибольшее расхождение доли класса
+в процентных пунктах), `match_rate_v1`, `match_rate_v2` (для CTU-13), `explained`
+(текст объяснения). Объяснение обязательно, если `rel_diff > 0.05`,
+или `max_class_share_diff_pp > 5`, или `match_rate_v2 < match_rate_v1`. Доли сравниваются
+в процентных пунктах, а не относительно: иначе редкие классы (2% → 3% = +50%) давали бы
+ложные срабатывания.
 Объяснения хранятся в `configs/v1_diff_notes.yaml`, чтобы не терялись между прогонами.
