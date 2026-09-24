@@ -26,6 +26,8 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "joblib",
+    # фича 003: разбор HTML-форм консоли (без него Form(...) в FastAPI не работает)
+    "python-multipart",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +37,8 @@ dev = [
     "scapy",
     # TestClient FastAPI работает поверх httpx
     "httpx",
+    # фича 003: разбор HTML страниц консоли в UI-тестах
+    "beautifulsoup4",
 ]
 
 [project.scripts]

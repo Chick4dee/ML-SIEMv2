@@ -1,0 +1,71 @@
+{#- Таблица списка — и часть страницы, и отдельный фрагмент для htmx.
+    Контейнер опрашивается раз в refresh секунд с If-None-Match: пока в прогоне ничего не
+    менялось, сервер отвечает 204 и htmx не трогает DOM (прокрутка и раскрытое не сбиваются).
+    Форм в таблице нет — опрос никогда не сотрёт введённый текст (FR-024). -#}
+{% from "macros.html" import sev, status, action_state, flag_badges, long_list, pager with context %}
+{% macro sort_th(key, title) -%}
+<th scope="col" class="sortable{% if view.sort == key %} sorted-{{ view.dir }}{% endif %}">
+  <a href="{{ view.sort_url(key) }}" hx-get="{{ view.sort_url(key) }}" hx-target="#incident-table" hx-swap="outerHTML" hx-push-url="true">{{ title }}{% if view.sort == key %} {{ '↓' if view.dir == 'desc' else '↑' }}{% endif %}</a>
+</th>
+{%- endmacro %}
+<div id="incident-table" class="incident-table"
+     hx-get="{{ view.url() }}" hx-trigger="every {{ refresh }}s" hx-swap="outerHTML"
+     hx-headers='{{ {"If-None-Match": etag} | tojson }}'>
+  <input type="hidden" name="sort" value="{{ view.sort }}" form="filters">
+  <input type="hidden" name="dir" value="{{ view.dir }}" form="filters">
+  {% for w in warnings %}<p class="warning" role="status">{{ w }}</p>{% endfor %}
+
+  <p class="count">Найдено: <strong data-total="{{ total }}">{{ total }}</strong>{% if view.filtered %} из {{ run_total }}{% endif %}</p>
+
+  {% if not items %}
+  <div class="empty">
+    {% if run_total == 0 %}
+      В этом прогоне нет инцидентов: детектор не нашёл атак.
+    {% else %}
+      Под выбранные фильтры не подошёл ни один инцидент.
+      <a href="/incidents?run={{ run_id | urlencode }}">Сбросить фильтры</a>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="table-wrap">
+    <table class="incidents">
+      <thead>
+        <tr>
+          {{ sort_th('severity', 'Серьёзность') }}
+          <th scope="col">Статус</th>
+          <th scope="col">Резолюция</th>
+          <th scope="col">Класс</th>
+          <th scope="col">Источник</th>
+          <th scope="col">Цели</th>
+          {{ sort_th('n_alerts', 'Алертов') }}
+          {{ sort_th('first_seen', 'Начало') }}
+          {{ sort_th('last_seen', 'Последний алерт') }}
+          <th scope="col">Ответственный</th>
+          <th scope="col">Действие</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in items %}
+        <tr data-incident="{{ i.incident_id }}">
+          <td>{{ sev(i.severity) }}</td>
+          <td>{{ status(i.status) }}</td>
+          <td>{{ i.resolution | label('resolution') }}</td>
+          <td>{{ i.attack_class }}</td>
+          <td class="ip src">
+            <a href="/incidents/{{ i.incident_id | urlencode }}">{{ i.src_ip }}</a>
+            {{ flag_badges(i.flags) }}
+          </td>
+          <td class="ip targets">{{ long_list(i.targets) }}</td>
+          <td class="num">{{ i.n_alerts }}</td>
+          <td class="time">{{ i.first_seen_ms | utc_ms }}</td>
+          <td class="time">{{ i.last_seen_ms | utc_ms }}</td>
+          <td>{{ i.assignee or '—' }}</td>
+          <td>{{ action_state(i.action) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ pager(view.page, pages, view.page_url, view.page_url, '#incident-table', push=True) }}
+  {% endif %}
+</div>

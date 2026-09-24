@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Не найдено{% endblock %}
+{% block content %}
+<section class="empty-state">
+  <h1>Не найдено</h1>
+  <p>{{ message }}.</p>
+  <p>Возможно, ссылка ведёт в другой прогон или в ней опечатка.
+    <a href="/incidents">Открыть список инцидентов</a>.</p>
+</section>
+{% endblock %}

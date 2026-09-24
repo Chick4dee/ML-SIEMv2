@@ -1,0 +1,24 @@
+{#- Вероятности детектора по всем классам для одного потока и порог (FR-010, research R10). -#}
+{% if not p.available %}
+<p class="muted">{{ p.reason }}</p>
+{% else %}
+<table class="probs-table">
+  <thead><tr><th scope="col">Класс</th><th scope="col">Вероятность</th></tr></thead>
+  <tbody>
+    {% for cls, v in p.probs %}
+    <tr{% if cls == p.predicted_class %} class="top"{% endif %}>
+      <td>{{ cls }}</td>
+      <td><meter min="0" max="1" value="{{ v }}"></meter> {{ '%.4f' | format(v) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p>Скор атаки (1 − P(benign)): <strong>{{ '%.4f' | format(p.attack_score) }}</strong>.
+{% if p.threshold is not none %}
+  Порог срабатывания <strong>{{ '%.4f' | format(p.threshold) }}</strong> ({{ p.threshold_note }}) —
+  {% if p.attack_score >= p.threshold %}<span class="badge over">порог превышен</span>{% else %}ниже порога{% endif %}.
+{% else %}
+  <span class="muted">{{ p.threshold_note }}.</span>
+{% endif %}
+</p>
+{% endif %}

@@ -1,0 +1,17 @@
+{#- Решение не ответственным (FR-012a): предупредить и спросить. Если продолжить — решение
+    применится, а store сам отметит в аудите by_non_assignee. -#}
+{% from "macros.html" import csrf with context %}
+<dialog open data-modal class="question" aria-labelledby="na-title">
+  <h2 id="na-title">Вы не ответственный</h2>
+  <p>Ответственный — <strong>{{ question.assignee }}</strong>. Всё равно продолжить?</p>
+  <p class="muted">В аудит-журнале будет отмечено, что решение принято не ответственным.</p>
+  <form method="post" action="{{ question.url }}" hx-post="{{ question.url }}" hx-target="#decisions" hx-swap="outerHTML">
+    {{ csrf() }}
+    {% for k, v in question['values'].items() if k != 'ack_not_assignee' %}
+    <input type="hidden" name="{{ k }}" value="{{ v }}">
+    {% endfor %}
+    <input type="hidden" name="ack_not_assignee" value="1">
+    <button type="submit">да, продолжить</button>
+  </form>
+  <form method="dialog"><button type="submit" class="secondary">отмена</button></form>
+</dialog>

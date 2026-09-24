@@ -1,0 +1,10 @@
+{#- Баннер нового прогона. Выбранный прогон зашит в адрес опроса и сам не меняется (FR-023). -#}
+<div id="runs-banner" hx-get="/fragments/runs-banner?run={{ run_id | urlencode }}" hx-trigger="every {{ refresh }}s" hx-swap="outerHTML">
+  {% if new_run %}
+  <div class="banner">
+    Появился новый прогон <code>{{ new_run.run_id }}</code> ({{ new_run.source }}, инцидентов {{ new_run.n_incidents }}) —
+    <a href="/?run={{ new_run.run_id | urlencode }}">переключиться</a>
+    или <a href="/incidents?run={{ new_run.run_id | urlencode }}">открыть его инциденты</a>.
+  </div>
+  {% endif %}
+</div>

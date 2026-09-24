@@ -1,0 +1,61 @@
+<!doctype html>
+{#- Каркас всех страниц консоли. Правила, которые здесь соблюдаются намеренно:
+    - никаких inline-скриптов и style="…": CSP default-src 'self' их запрещает;
+    - все данные выводятся с автоэкранированием; tojson — для JSON в атрибутах hx-headers;
+    - каждая ссылка и форма работают и без JS, hx-* лишь дополняют их. -#}
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{{ htmx_config | tojson }}'>
+  <title>{% block title %}Консоль SOC{% endblock %} · ML-SIEM</title>
+  <link rel="stylesheet" href="/static/console.css?v={{ static_v }}">
+  <script src="/static/vendor/htmx.min.js?v={{ static_v }}" defer></script>
+  <script src="/static/console.js?v={{ static_v }}" defer></script>
+</head>
+<body hx-headers='{{ {"X-CSRF-Token": csrf_token} | tojson }}' data-csrf="{{ csrf_token }}">
+  <header class="top">
+    <a class="brand" href="/{{ '?run=' ~ (run_id | urlencode) if run_id else '' }}">ML-SIEM · консоль SOC</a>
+    <nav class="nav">
+      <a href="/{{ '?run=' ~ (run_id | urlencode) if run_id else '' }}">Панель</a>
+      <a href="/incidents{{ '?run=' ~ (run_id | urlencode) if run_id else '' }}">Инциденты</a>
+      <a href="/audit">Журнал аудита</a>
+    </nav>
+    {% if runs %}
+    <form class="run-picker" method="get" action="{{ run_action }}">
+      <label>Прогон
+        <select name="run" data-autosubmit>
+          {% for r in runs %}
+          <option value="{{ r.run_id }}"{% if r.run_id == run_id %} selected{% endif %}>{{ r.run_id }} · {{ r.source }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit" class="btn-small">выбрать</button>
+    </form>
+    {% endif %}
+    <div class="who">
+      {% if analyst %}
+        Аналитик: <strong class="analyst-name">{{ analyst }}</strong>
+        <a href="/analyst?next={{ next_url | urlencode }}">сменить</a>
+      {% else %}
+        <a class="btn" href="/analyst?next={{ next_url | urlencode }}">представиться</a>
+      {% endif %}
+    </div>
+  </header>
+
+  <div id="stale-bar" class="stale-bar" role="status" hidden>
+    Нет связи с сервером — данные на странице могут быть устаревшими. Консоль продолжает попытки.
+  </div>
+  <div id="banners">
+    {% if run_id %}{% include "fragments/_runs_banner.html" %}{% endif %}
+  </div>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="foot">
+    Все действия реагирования только симулируются — консоль ничего не меняет в сети и на хостах.
+    Время — UTC.
+  </footer>
+</body>
+</html>

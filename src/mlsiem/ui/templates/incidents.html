@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Инциденты{% endblock %}
+{% block content %}
+{% if not run_id %}
+  {% include "fragments/_empty.html" %}
+{% else %}
+<h1>Инциденты прогона <code>{{ run_id }}</code></h1>
+
+{#- Фильтры — обычная GET-форма (работает без JS). С htmx любое изменение сразу подменяет
+    только таблицу, а адрес страницы обновляется (hx-push-url), так что вид можно
+    отправить ссылкой. Страница при смене фильтра сбрасывается на первую. -#}
+<form id="filters" class="filters" method="get" action="/incidents"
+      hx-get="/incidents" hx-target="#incident-table" hx-swap="outerHTML"
+      hx-push-url="true" hx-trigger="change, submit">
+  <input type="hidden" name="run" value="{{ run_id }}">
+  {#- sort и dir живут в таблице (form="filters"): щелчок по заголовку перерисовывает
+      таблицу, и следующая смена фильтра сохранит выбранную сортировку -#}
+
+  <fieldset>
+    <legend>Статус</legend>
+    {% for s in statuses %}
+    <label><input type="checkbox" name="status" value="{{ s }}"{% if s in view.status %} checked{% endif %}> {{ s | label('status') }}</label>
+    {% endfor %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Серьёзность</legend>
+    {% for s in severities | reverse %}
+    <label><input type="checkbox" name="severity" value="{{ s }}"{% if s in view.severity %} checked{% endif %}> {{ s | label('severity') }}</label>
+    {% endfor %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Действие</legend>
+    {% for s in action_states %}
+    <label><input type="checkbox" name="action_state" value="{{ s }}"{% if s in view.action_state %} checked{% endif %}> {{ s | label('action_state') }}</label>
+    {% endfor %}
+  </fieldset>
+
+  <fieldset>
+    <legend>Подозрительный источник</legend>
+    <label><input type="radio" name="flagged" value=""{% if not view.flagged %} checked{% endif %}> все</label>
+    <label><input type="radio" name="flagged" value="only"{% if view.flagged == 'only' %} checked{% endif %}> только подозрительные</label>
+    <label><input type="radio" name="flagged" value="hide"{% if view.flagged == 'hide' %} checked{% endif %}> скрыть подозрительные</label>
+  </fieldset>
+
+  <div class="filter-fields">
+    <label>Класс атаки
+      <select name="attack_class">
+        <option value="">все</option>
+        {% for c in classes %}
+        <option value="{{ c }}"{% if c == view.attack_class %} selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+        {% if view.attack_class and view.attack_class not in classes %}
+        <option value="{{ view.attack_class }}" selected>{{ view.attack_class }}</option>
+        {% endif %}
+      </select>
+    </label>
+    <label>Источник (IP или сеть)
+      <input type="text" name="src" value="{{ view.src or '' }}" placeholder="175.45.176.0/24" maxlength="64">
+    </label>
+    <label>Ответственный
+      <select name="assignee">
+        <option value="">все</option>
+        <option value="{{ no_assignee }}"{% if view.assignee == no_assignee %} selected{% endif %}>без ответственного</option>
+        {% for a in assignees %}
+        <option value="{{ a }}"{% if a == view.assignee %} selected{% endif %}>{{ a }}</option>
+        {% endfor %}
+        {% if view.assignee and view.assignee != no_assignee and view.assignee not in assignees %}
+        <option value="{{ view.assignee }}" selected>{{ view.assignee }}</option>
+        {% endif %}
+      </select>
+    </label>
+  </div>
+
+  <div class="filter-actions">
+    <button type="submit">показать</button>
+    <a href="/incidents?run={{ run_id | urlencode }}">сбросить фильтры</a>
+  </div>
+</form>
+
+{% include "fragments/_incident_table.html" %}
+{% endif %}
+{% endblock %}

@@ -44,3 +44,25 @@ playbook:
     - {id: noisy_attack, when: {class_in: [dos, generic, fuzzers]}, action: block_source_ip}
     - {id: recon, when: {class_in: [reconnaissance, analysis], min_severity: medium}, action: block_source_ip}
     - {id: default, when: {}, action: observe}
+
+# ---------------------------------------------------------------- фича 003: консоль
+
+# Именованные сети для подсказок «подозрительный источник» (FR-018, research R8).
+# role: victims | background | infrastructure | other. Метку источника дают только
+# victims и background: если «атакующий» адрес на деле из сети жертв или фонового трафика,
+# скорее всего, группировка поймала ответное направление. Метка — лишь подсказка аналитику:
+# серьёзность, статус и действие инцидента она не меняет (FR-020).
+# Значения по умолчанию — наблюдения из прогона 002 на UNSW-NB15.
+networks:
+  - {name: "жертвы UNSW-NB15", role: victims, cidrs: [149.171.126.0/24]}
+  - {name: "фон UNSW-NB15", role: background, cidrs: [59.166.0.0/24]}
+
+ui:
+  # Как часто открытые панель, список и баннер нового прогона опрашивают сервер (3…300 с)
+  refresh_seconds: 10
+  # Строк на странице списка инцидентов и журнала аудита
+  page_size: 50
+  # Сколько последних алертов прогона показывать на панели
+  recent_alerts: 20
+  # Алертов на страницу в карточке инцидента
+  alerts_page_size: 50

@@ -1,0 +1,50 @@
+{#- Предложенное действие и решение по нему (FR-014, FR-015). Кнопки — только пока действие
+    ждёт решения; после подтверждения — запись симуляции и прямое «реальных изменений не было». -#}
+{% from "macros.html" import csrf, error, action_state with context %}
+{% set a = inc.action %}
+{% set fv = values.get('action', {}) %}
+{% set retry = errors.get('_conflict') == 'action' %}
+{{ error(errors, 'action') }}
+{% if errors.get('action') and not analyst %}<p><a class="btn" href="/analyst?next=/incidents/{{ inc.incident_id | urlencode }}">представиться</a></p>{% endif %}
+
+{% if not a %}
+<p class="muted">Плейбук не предложил действия для этого инцидента.</p>
+{% else %}
+<dl class="action">
+  <div><dt>Действие</dt><dd><strong>{{ a.action_type | label('action_type') }}</strong></dd></div>
+  <div><dt>Объект</dt><dd class="ip">{{ a.target or 'без объекта' }}</dd></div>
+  <div><dt>Правило</dt><dd><code>{{ a.rule_id }}</code> — {{ a.rule_text }}</dd></div>
+  <div><dt>Состояние</dt><dd>{{ action_state(a) }}</dd></div>
+</dl>
+
+{% if a.state == 'proposed' %}
+  {% set confirm_url = "/actions/" ~ (a.action_id | urlencode) ~ "/confirm" %}
+  {% set reject_url = "/actions/" ~ (a.action_id | urlencode) ~ "/reject" %}
+  <form method="post" action="{{ confirm_url }}" hx-post="{{ confirm_url }}" hx-target="#decisions" hx-swap="outerHTML">
+    {{ csrf() }}
+    <input type="hidden" name="expected_version" value="{{ a.version }}">
+    <label>Комментарий к подтверждению (необязательно)
+      <textarea name="comment" rows="2">{{ '' if fv.get('reject') else fv.get('comment', '') }}</textarea>
+    </label>
+    <button type="submit">{{ 'повторить на новой версии' if retry else 'подтвердить…' }}</button>
+  </form>
+  <form method="post" action="{{ reject_url }}" hx-post="{{ reject_url }}" hx-target="#decisions" hx-swap="outerHTML">
+    {{ csrf() }}
+    <input type="hidden" name="expected_version" value="{{ a.version }}">
+    <input type="hidden" name="reject" value="1">
+    <label>Почему отклонить (обязательно)
+      <textarea name="comment" rows="2" required>{{ fv.get('comment', '') if fv.get('reject') else '' }}</textarea>
+    </label>
+    <button type="submit" class="secondary">{{ 'повторить на новой версии' if retry else 'отклонить' }}</button>
+  </form>
+{% elif a.state == 'executed' %}
+  <div class="simulation">
+    <h3>Симуляция выполнения</h3>
+    <p>{{ a.simulation.description if a.simulation else '' }}</p>
+    <p class="strong">Реальных изменений в сети и на хостах не было.</p>
+    <p class="muted">Подтвердил {{ a.decided_by }}, {{ a.decided_at | utc_iso }}{% if a.comment %}: «{{ a.comment }}»{% endif %}</p>
+  </div>
+{% else %}
+  <p class="muted">Отклонил {{ a.decided_by }}, {{ a.decided_at | utc_iso }}: «{{ a.comment }}»</p>
+{% endif %}
+{% endif %}

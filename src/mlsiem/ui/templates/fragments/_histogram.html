@@ -1,0 +1,21 @@
+{#- Гистограмма алертов инцидента по времени (FR-011): столбики считает база, рисует сервер
+    статичным SVG — без скриптов и библиотек графиков. Число алертов каждого столбика —
+    в <title> (всплывающая подсказка браузера). Цвет задаётся классом в console.css. -#}
+{% set h = histogram %}
+{% set n = h.counts | length %}
+{% set top = h.counts | max if n else 0 %}
+{% set w = 600 / n if n else 600 %}
+<figure class="histogram">
+  <svg viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="Число алертов по времени: {{ n }} интервалов по {{ (h.bin_ms / 1000) | round(1) }} с">
+    {% for c in h.counts %}
+    {% set bh = (c / top * 100) if top else 0 %}
+    <rect class="bar" x="{{ '%.2f' | format(loop.index0 * w + 0.5) }}" y="{{ '%.2f' | format(105 - bh) }}" width="{{ '%.2f' | format([w - 1, 0.5] | max) }}" height="{{ '%.2f' | format(bh) }}"><title>{{ c }} алертов, с {{ (h.start_ms + loop.index0 * h.bin_ms) | utc_ms }}</title></rect>
+    {% endfor %}
+    <line class="axis" x1="0" y1="105.5" x2="600" y2="105.5"></line>
+  </svg>
+  <figcaption>
+    <span>{{ h.start_ms | utc_ms }}</span>
+    <span class="muted">шаг {{ (h.bin_ms / 1000) | round(1) }} с · максимум {{ top }} в интервале</span>
+    <span>{{ h.end_ms | utc_ms }}</span>
+  </figcaption>
+</figure>

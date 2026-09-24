@@ -1,0 +1,37 @@
+{#- Счётчики панели. Каждый — ссылка ровно на тот список, который даёт это число (SC-004):
+    ссылки строит views.dashboard тем же IncidentListView, что разбирает адрес списка. -#}
+{% macro tile(title, pair, key) -%}
+<a class="tile" href="{{ pair[1] }}" data-counter="{{ key }}" data-count="{{ pair[0] }}">
+  <span class="tile-n">{{ pair[0] }}</span><span class="tile-t">{{ title }}</span>
+</a>
+{%- endmacro %}
+{% macro group(title, rows, kind) -%}
+<section class="group">
+  <h2>{{ title }}</h2>
+  <ul class="counts">
+    {% for key, n, url in rows %}
+    <li><a href="{{ url }}" data-counter="{{ kind }}:{{ key }}" data-count="{{ n }}">
+      {% if kind == 'class' %}{{ key }}{% else %}{{ key | label(kind) }}{% endif %}
+      <strong>{{ n }}</strong></a></li>
+    {% endfor %}
+  </ul>
+</section>
+{%- endmacro %}
+<div id="dashboard-counters" class="dashboard-counters"
+     hx-get="/fragments/dashboard?run={{ run_id | urlencode }}" hx-trigger="every {{ refresh }}s" hx-swap="outerHTML"
+     hx-headers='{{ {"If-None-Match": d.etag} | tojson }}'>
+  {% if d.summary.total == 0 %}
+  <p class="empty">В этом прогоне нет инцидентов: детектор не нашёл атак, поэтому все счётчики — нули.</p>
+  {% endif %}
+  <div class="tiles">
+    {{ tile('всего инцидентов', d.counters.total, 'total') }}
+    {{ tile('действий ждут решения', d.counters.actions_pending, 'actions_pending') }}
+    {{ tile('открытых без ответственного', d.counters.unassigned, 'unassigned') }}
+    {{ tile('с подозрительным источником', d.counters.flagged, 'flagged') }}
+  </div>
+  <div class="groups">
+    {{ group('По статусу', d.by_status, 'status') }}
+    {{ group('По серьёзности', d.by_severity, 'severity') }}
+    {{ group('По классу атаки', d.by_class, 'class') }}
+  </div>
+</div>

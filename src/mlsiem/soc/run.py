@@ -240,6 +240,11 @@ def run_chain(
                     "alerts_true_share": summary.alerts_true_share,
                     "alerts_class_match_share": summary.alerts_class_match_share,
                     "schema_version": SCHEMA.version,
+                    # Фича 003: консоль показывает порог рядом с вероятностями алерта, а
+                    # классы — в порядке столбцов p_<класс> в verdicts.parquet. Пишем их
+                    # в прогон, потому что детектор в models/ потом могут заменить
+                    "threshold": float(detector.threshold),
+                    "classes": list(detector.classes),
                 },
                 "warnings": warnings,
             },

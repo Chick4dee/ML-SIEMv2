@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Представиться{% endblock %}
+{% block content %}
+<section class="narrow">
+  <h1>Кто вы?</h1>
+  <p>Имя нужно для журнала: каждое решение в консоли записывается от имени аналитика.
+    Пароля нет — это подпись, а не вход. Имя запоминается в этом браузере.</p>
+  {% if error %}{% with message = error %}{% include "fragments/_error.html" %}{% endwith %}{% endif %}
+  <form method="post" action="/analyst">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label>Имя аналитика
+      <input type="text" name="name" required maxlength="64" autofocus value="{{ name or analyst or '' }}">
+    </label>
+    <button type="submit">сохранить</button>
+  </form>
+</section>
+{% endblock %}

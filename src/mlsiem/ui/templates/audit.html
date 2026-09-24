@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Журнал аудита{% endblock %}
+{% block content %}
+<h1>Журнал аудита</h1>
+<p class="muted">Все решения системы и аналитиков, новые сверху. Журнал только для чтения:
+  изменить или удалить запись нельзя ни здесь, ни в базе.</p>
+<form class="filters" method="get" action="/audit"
+      hx-get="/audit" hx-target="#audit-table" hx-swap="outerHTML" hx-push-url="true" hx-trigger="change, submit">
+  <div class="filter-fields">
+    <label>Аналитик <input type="text" name="actor" value="{{ view.actor or '' }}" maxlength="64"></label>
+    <label>Событие
+      <select name="event">
+        <option value="">все</option>
+        {% for e in events %}<option value="{{ e }}"{% if e == view.event %} selected{% endif %}>{{ e | label('event') }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Инцидент <input type="text" name="incident" value="{{ view.incident or '' }}"></label>
+    <label>Прогон
+      <select name="run">
+        <option value="">все</option>
+        {% for r in runs %}<option value="{{ r.run_id }}"{% if r.run_id == view.run %} selected{% endif %}>{{ r.run_id }}</option>{% endfor %}
+      </select>
+    </label>
+  </div>
+  <div class="filter-actions">
+    <button type="submit">показать</button>
+    <a href="/audit">сбросить фильтры</a>
+  </div>
+</form>
+{% include "fragments/_audit_table.html" %}
+{% endblock %}

@@ -13,6 +13,11 @@
 latin-1, поэтому имя пишется латиницей (например, `vlad`).
 
 Аудит-журнал только читается: методов изменения для `/audit` нет вовсе (405).
+
+Фича 003 только добавляет: параметры списка (`src_ip`, `assignee`, `action_state`, `flagged`,
+`sort`, `dir`), поля `assignee` и `flags`, метод `POST /incidents/{id}/assign`
+(contracts/api-v1-additions.md). CORS-заголовков по-прежнему нет — это часть защиты: запрос
+с `X-Analyst` с чужого сайта браузер без разрешающего preflight не отправит.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from mlsiem.soc import flags as soc_flags
 from mlsiem.soc import store
 from mlsiem.soc.config import SEVERITY_LEVELS, SocConfig
 
@@ -65,6 +71,16 @@ class HistoryEntry(BaseModel):
     comment: str | None
 
 
+class SourceFlag(BaseModel):
+    """Метка подозрительного источника (фича 003) — подсказка, а не решение."""
+
+    kind: str
+    network_name: str | None
+    role: str | None
+    related_incidents: list[str]
+    explanation: str
+
+
 class IncidentItem(BaseModel):
     incident_id: str
     run_id: str
@@ -79,6 +95,9 @@ class IncidentItem(BaseModel):
     resolution: str | None
     action: ActionShort | None
     version: int
+    # фича 003 — только добавления: клиенты 002 эти поля просто не читают
+    assignee: str | None = None
+    flags: list[SourceFlag] = []
 
 
 class IncidentCard(IncidentItem):
@@ -168,6 +187,12 @@ class StatusChange(BaseModel):
     expected_version: int = Field(ge=1)
 
 
+class AssignChange(BaseModel):
+    assignee: str | None = None
+    comment: str | None = None
+    expected_version: int = Field(ge=1)
+
+
 class ActionDecision(BaseModel):
     comment: str | None = None
     expected_version: int = Field(ge=1)
@@ -214,7 +239,9 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
         description="Инциденты, предложения плейбуков (только симуляция) и аудит-журнал.",
     )
     conn0 = store.connect(cfg.db)
-    store.init_db(conn0)
+    # Миграция схемы (если база от 002) — здесь, до первого запроса; флаг нужен CLI для
+    # сообщения «схема базы обновлена»
+    app.state.migrated = store.init_db(conn0)
     conn0.close()
 
     @app.exception_handler(store.StoreError)
@@ -227,6 +254,10 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException):
+        # Вне /api/v1 — страницы консоли: там «не найдено» должно быть страницей, а не JSON
+        page_error = getattr(app.state, "page_error", None)
+        if page_error is not None and not request.url.path.startswith(PREFIX):
+            return page_error(request, exc)
         if exc.status_code == 404:
             return _error(404, "not_found", "такого адреса в API нет")
         if exc.status_code == 405:
@@ -250,6 +281,20 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
 
     # ---------------- инциденты
 
+    def with_flags(conn, items: list[dict]) -> list[dict]:
+        """Добавляет к инцидентам метки подозрительного источника (считаются по прогону)."""
+        by_run: dict[str, dict] = {}
+        for item in items:
+            run_flags = by_run.setdefault(
+                item["run_id"], soc_flags.run_flags(conn, item["run_id"], cfg.networks)
+            )
+            item["flags"] = [f.as_dict() for f in run_flags.get(item["incident_id"], [])]
+        return items
+
+    def flagged_ids(conn, run_id: str | None) -> list[str]:
+        runs = [run_id] if run_id else [r["run_id"] for r in store.list_runs(conn)]
+        return [i for r in runs for i in soc_flags.run_flags(conn, r, cfg.networks)]
+
     @app.get(PREFIX + "/incidents", response_model=IncidentPage)
     def list_incidents(
         status: str | None = None,
@@ -258,6 +303,12 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
         run_id: str | None = None,
         from_ms: int | None = None,
         to_ms: int | None = None,
+        src_ip: str | None = None,
+        assignee: str | None = None,
+        action_state: str | None = None,
+        flagged: Literal["only", "hide"] | None = None,
+        sort: Literal["severity", "first_seen", "last_seen", "n_alerts"] | None = None,
+        dir: Literal["asc", "desc"] | None = None,
         limit: int = Query(50, ge=1, le=MAX_LIMIT),
         offset: int = Query(0, ge=0),
         conn=Depends(db),
@@ -269,13 +320,32 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
             "run_id": run_id,
             "from_ms": from_ms,
             "to_ms": to_ms,
+            "src_ip": src_ip,
+            "assignee": assignee,
+            "action_state": _csv(action_state, store.ACTION_STATES, "action_state"),
         }
-        total, items = store.list_incidents(conn, filters, limit, offset)
-        return {"total": total, "items": items}
+        if flagged == "only":
+            filters["incident_ids"] = flagged_ids(conn, run_id)
+        elif flagged == "hide":
+            filters["exclude_ids"] = flagged_ids(conn, run_id)
+        # По контракту: без sort — порядок 002; dir по умолчанию desc для серьёзности
+        # (сначала критические) и asc для времени и числа алертов
+        direction = dir or ("desc" if sort == "severity" else "asc")
+        total, items = store.list_incidents(
+            conn, filters, limit, offset, sort=sort, direction=direction
+        )
+        return {"total": total, "items": with_flags(conn, items)}
 
     @app.get(PREFIX + "/incidents/{incident_id}", response_model=IncidentCard)
     def get_incident(incident_id: str, conn=Depends(db)):
-        return store.get_incident(conn, incident_id)
+        return with_flags(conn, [store.get_incident(conn, incident_id)])[0]
+
+    @app.post(PREFIX + "/incidents/{incident_id}/assign", response_model=IncidentCard)
+    def assign(incident_id: str, body: AssignChange, who: str = Depends(analyst), conn=Depends(db)):
+        card = store.assign(
+            conn, incident_id, who, body.assignee, body.expected_version, body.comment
+        )
+        return with_flags(conn, [card])[0]
 
     @app.get(PREFIX + "/incidents/{incident_id}/alerts", response_model=AlertPage)
     def incident_alerts(
@@ -291,7 +361,7 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
     def change_status(
         incident_id: str, body: StatusChange, who: str = Depends(analyst), conn=Depends(db)
     ):
-        return store.change_status(
+        card = store.change_status(
             conn,
             incident_id,
             who,
@@ -300,6 +370,7 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
             body.comment,
             body.expected_version,
         )
+        return with_flags(conn, [card])[0]
 
     # ---------------- действия
 
@@ -348,4 +419,9 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
                 version = None
         return {"status": "ok", "detector_version": version, "db": Path(cfg.db).as_posix()}
 
+    # Консоль аналитика (фича 003) — в том же процессе и на том же порту (FR-031). Импорт
+    # внутри функции: ядро API ничего не знает о HTML, связь только здесь, в одну сторону
+    from mlsiem.ui.routes import install
+
+    install(app, cfg, Path(detector_dir))
     return app

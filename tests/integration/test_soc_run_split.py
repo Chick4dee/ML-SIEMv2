@@ -57,8 +57,18 @@ def test_run_split(soc_cfg, synthetic_split, tiny_detector):
     per_inc = conn.execute(
         "SELECT SUM(n_alerts) FROM incidents WHERE run_id = ?", (s.run_id,)
     ).fetchone()[0]
+    run_row = store.list_runs(conn)[0]
     conn.close()
     assert n_alerts == per_inc == s.n_alerts
+
+    # Фича 003: порог и порядок классов детектора сохранены в сводке прогона — консоль
+    # показывает их рядом с вероятностями алерта, даже если детектор потом заменят
+    card = json.loads((tiny_detector / "model_card.json").read_text(encoding="utf-8"))
+    assert run_row["summary"]["threshold"] == pytest.approx(card["threshold"])
+    assert run_row["summary"]["classes"] == card["classes"]
+    assert [c for c in verdicts.columns if c.startswith("p_")] == [
+        f"p_{c}" for c in run_row["summary"]["classes"]
+    ]
 
 
 def test_repeat_gives_same_incidents(soc_cfg, synthetic_split, tiny_detector):

@@ -1,0 +1,32 @@
+{#- Таблица журнала аудита: события и детали по-русски, переход к инциденту (FR-026).
+    Ни одной формы и кнопки изменения — журнал только читается (FR-027). -#}
+{% from "macros.html" import pager with context %}
+<div id="audit-table" class="audit-table">
+  {% for w in view.warnings %}<p class="warning" role="status">{{ w }}</p>{% endfor %}
+  <p class="count">Записей: <strong data-total="{{ total }}">{{ total }}</strong></p>
+  {% if items %}
+  <div class="table-wrap">
+    <table class="audit">
+      <thead><tr><th scope="col">№</th><th scope="col">Когда</th><th scope="col">Кто</th><th scope="col">Событие</th><th scope="col">Инцидент</th><th scope="col">Действие</th><th scope="col">Подробности</th></tr></thead>
+      <tbody>
+        {% for e in items %}
+        <tr data-entry="{{ e.entry_id }}" data-event="{{ e.event }}">
+          <td class="num">{{ e.entry_id }}</td>
+          <td class="time">{{ e.at | utc_iso }}</td>
+          <td>{{ e.actor }}</td>
+          <td>{{ e.event | label('event') }}</td>
+          <td>{% if e.incident_id %}<a href="/incidents/{{ e.incident_id | urlencode }}">{{ e.incident_id }}</a>{% else %}—{% endif %}</td>
+          <td>{{ e.action_id or '—' }}</td>
+          <td>
+            {% for k, v in details(e) %}<div><span class="muted">{{ k }}:</span> {{ v }}</div>{% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ pager(view.page, pages, view.page_url, view.page_url, '#audit-table', push=True) }}
+  {% else %}
+  <p class="empty">Под фильтры не подошла ни одна запись. <a href="/audit">Сбросить фильтры</a></p>
+  {% endif %}
+</div>

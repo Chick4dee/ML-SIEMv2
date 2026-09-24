@@ -277,8 +277,22 @@ def cmd_soc_serve(args, cfg) -> int:
             cfg.api.host,
         )
         return EXIT_ERROR
+    from mlsiem.soc.store import SCHEMA_VERSION, SchemaTooNew
+
     port = args.port or cfg.api.port
-    app = create_app(cfg, detector_dir=Path(args.detector))
+    try:
+        # create_app сам приводит базу к схеме фичи 003 (миграция 002 → 2 одной транзакцией)
+        app = create_app(cfg, detector_dir=Path(args.detector))
+    except SchemaTooNew as exc:
+        log.error("Нельзя открыть %s: %s", cfg.db, exc.message)
+        return EXIT_ERROR
+    if app.state.migrated:
+        log.info(
+            "Схема базы %s обновлена до версии %d (аудит перенесён целиком)",
+            cfg.db,
+            SCHEMA_VERSION,
+        )
+    log.info("Консоль аналитика: http://127.0.0.1:%d/", port)
     log.info(
         "API аналитика: http://127.0.0.1:%d/api/v1 (документация: http://127.0.0.1:%d/docs)",
         port,
@@ -410,7 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data-dir", default="data", help="где лежат потоки и разбиения 001")
     p.add_argument("--detector", default="models/detector", help="каталог артефакта детектора")
     p.set_defaults(func=cmd_soc_run)
-    p = sub.add_parser("serve", help="поднять API аналитика на 127.0.0.1")
+    p = sub.add_parser("serve", help="поднять консоль и API аналитика на 127.0.0.1")
     p.add_argument("--port", type=int, help="порт (по умолчанию из конфига)")
     p.add_argument("--detector", default="models/detector", help="каталог артефакта детектора")
     p.set_defaults(func=cmd_soc_serve)

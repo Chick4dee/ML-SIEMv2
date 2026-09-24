@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% from "macros.html" import sev, long_list with context %}
+{% block title %}Инцидент {{ inc.incident_id }}{% endblock %}
+{% block content %}
+<p class="back"><a href="/incidents?run={{ inc.run_id | urlencode }}">← к списку инцидентов прогона</a></p>
+<h1>Инцидент <code>{{ inc.incident_id }}</code></h1>
+
+<section class="summary">
+  <dl class="facts">
+    <div><dt>Источник (ключ группировки)</dt><dd class="ip">{{ inc.src_ip }}</dd></div>
+    <div><dt>Класс атаки</dt><dd>{{ inc.attack_class }}</dd></div>
+    <div><dt>Цели ({{ inc.targets | length }})</dt><dd class="ip">{{ long_list(inc.targets, 5) }}</dd></div>
+    <div><dt>Интервал (время трафика)</dt><dd class="time">{{ inc.first_seen_ms | utc_ms }} — {{ inc.last_seen_ms | utc_ms }}</dd></div>
+    <div><dt>Алертов</dt><dd class="num">{{ inc.n_alerts }}</dd></div>
+    <div><dt>Уверенность детектора</dt><dd>макс. {{ '%.3f' | format(inc.max_score) }}, средняя {{ '%.3f' | format(inc.mean_score) }}</dd></div>
+    <div class="wide"><dt>Серьёзность</dt><dd>{{ sev(inc.severity) }} <span class="reason">{{ inc.severity_reason }}</span></dd></div>
+    <div><dt>Прогон</dt><dd><code>{{ inc.run_id }}</code> · {{ run.source }}</dd></div>
+  </dl>
+</section>
+
+{% if inc.flags %}
+<section class="flags-box">
+  <h2>Почему помечен как «подозрительный источник»</h2>
+  <ul>
+    {% for f in inc.flags %}
+    <li>
+      <strong>{{ f.kind | label('flag') }}{% if f.role %} · {{ f.role | label('role') }}{% endif %}:</strong>
+      {{ f.explanation }}
+      {% if f.related_incidents %}
+      <span class="related">
+        {% for rid in f.related_incidents[:10] %}<a href="/incidents/{{ rid | urlencode }}">{{ rid }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+      </span>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="muted">Метка — подсказка: серьёзность, статус и предложенное действие она не меняет.
+    Если это ответное направление или фон, закройте инцидент как «ложное срабатывание».</p>
+</section>
+{% endif %}
+
+{% include "fragments/_decisions.html" %}
+
+<section class="histogram-box">
+  <h2>Алерты по времени</h2>
+  {% include "fragments/_histogram.html" %}
+</section>
+
+<section id="alerts-section">
+  <h2>Алерты</h2>
+  {% include "fragments/_alerts.html" %}
+</section>
+
+{% include "fragments/_timeline.html" %}
+{% endblock %}

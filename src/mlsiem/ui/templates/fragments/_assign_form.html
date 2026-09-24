@@ -1,0 +1,37 @@
+{#- Назначение ответственного (FR-012). Можно и у закрытого инцидента — статус не меняется. -#}
+{% from "macros.html" import csrf, error with context %}
+{% set fv = values.get('assign', {}) %}
+{% set url = "/incidents/" ~ (inc.incident_id | urlencode) ~ "/assign" %}
+{% set retry = errors.get('_conflict') == 'assign' %}
+{{ error(errors, 'assign') }}
+{% if errors.get('assign') and not analyst %}<p><a class="btn" href="/analyst?next=/incidents/{{ inc.incident_id | urlencode }}">представиться</a></p>{% endif %}
+
+{% if inc.assignee != analyst %}
+<form class="inline" method="post" action="{{ url }}" hx-post="{{ url }}" hx-target="#decisions" hx-swap="outerHTML">
+  {{ csrf() }}
+  <input type="hidden" name="expected_version" value="{{ inc.version }}">
+  <input type="hidden" name="take" value="1">
+  <button type="submit">{{ 'повторить на новой версии: ' if retry else '' }}взять себе</button>
+</form>
+{% endif %}
+
+<form method="post" action="{{ url }}" hx-post="{{ url }}" hx-target="#decisions" hx-swap="outerHTML">
+  {{ csrf() }}
+  <input type="hidden" name="expected_version" value="{{ inc.version }}">
+  <label>Назначить другого
+    <input type="text" name="assignee" maxlength="64" required value="{{ fv.get('assignee', '') }}" placeholder="имя аналитика">
+  </label>
+  <label>Комментарий (необязательно)
+    <textarea name="comment" rows="2">{{ fv.get('comment', '') }}</textarea>
+  </label>
+  <button type="submit">{{ 'повторить на новой версии' if retry else 'назначить' }}</button>
+</form>
+
+{% if inc.assignee %}
+<form class="inline" method="post" action="{{ url }}" hx-post="{{ url }}" hx-target="#decisions" hx-swap="outerHTML">
+  {{ csrf() }}
+  <input type="hidden" name="expected_version" value="{{ inc.version }}">
+  <input type="hidden" name="assignee" value="">
+  <button type="submit" class="secondary">снять назначение</button>
+</form>
+{% endif %}

@@ -1,0 +1,21 @@
+{#- Явный вопрос перед подтверждением действия (FR-014). С JS это модальный <dialog>
+    (console.js вызывает showModal), без JS — тот же блок прямо на странице. Форма повторяет
+    все введённые поля и добавляет ack_action=1. -#}
+{% from "macros.html" import csrf with context %}
+{% set a = question.action %}
+<dialog open data-modal class="question" aria-labelledby="confirm-title">
+  <h2 id="confirm-title">Подтвердить действие?</h2>
+  <p>Подтвердить: <strong>{{ a.action_type | label('action_type') }}</strong>
+    для <strong class="ip">{{ a.target or 'без объекта' }}</strong>
+    (правило <code>{{ a.rule_id }}</code>)?</p>
+  <p class="strong">Выполнение только симулируется: реальных изменений в сети и на хостах не будет.</p>
+  <form method="post" action="{{ question.url }}" hx-post="{{ question.url }}" hx-target="#decisions" hx-swap="outerHTML">
+    {{ csrf() }}
+    {% for k, v in question['values'].items() if k != 'ack_action' %}
+    <input type="hidden" name="{{ k }}" value="{{ v }}">
+    {% endfor %}
+    <input type="hidden" name="ack_action" value="1">
+    <button type="submit">да, подтвердить</button>
+  </form>
+  <form method="dialog"><button type="submit" class="secondary">отмена</button></form>
+</dialog>

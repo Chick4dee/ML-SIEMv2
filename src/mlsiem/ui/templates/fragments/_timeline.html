@@ -1,0 +1,59 @@
+{#- Хронология, история изменений и аудит инцидента. Перерисовывается по событию
+    incident-changed, которое сервер присылает после каждого решения из этой карточки. -#}
+<section id="incident-log" class="incident-log" hx-get="/fragments/incidents/{{ inc.incident_id | urlencode }}/timeline" hx-trigger="incident-changed from:body" hx-swap="outerHTML">
+  <h2>Хронология</h2>
+  <p class="muted">Время трафика — из датасета (время потоков), время решения — время работы
+    системы и аналитиков. Оба в UTC.</p>
+  <ol class="timeline">
+    {% for ev in timeline %}
+    <li class="ev clock-{{ ev.clock }}" data-kind="{{ ev.kind }}">
+      <time>{{ ev.at }}</time>
+      <span class="clock">{{ ev.clock | label('clock') }}</span>
+      <strong>{{ ev.kind | label('event') }}</strong>{% if ev.actor %} · <span class="actor">{{ ev.actor }}</span>{% endif %}
+      <div class="ev-text">{{ ev.text }}{% if ev.non_assignee %} <span class="badge warn">не ответственный</span>{% endif %}</div>
+      {% if ev.comment %}<blockquote class="comment">{{ ev.comment }}</blockquote>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+
+  <h2>История изменений</h2>
+  {% if inc.history %}
+  <div class="table-wrap">
+    <table class="history">
+      <thead><tr><th scope="col">Когда</th><th scope="col">Кто</th><th scope="col">Поле</th><th scope="col">Было → стало</th><th scope="col">Комментарий</th></tr></thead>
+      <tbody>
+        {% for h in inc.history %}
+        <tr>
+          <td class="time">{{ h.at | utc_iso }}</td>
+          <td>{{ h.analyst }}</td>
+          <td>{{ h.field | label('field') }}</td>
+          <td>{{ h.old | label(h.field) }} → {{ h.new | label(h.field) }}</td>
+          <td class="comment">{{ h.comment or '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">Изменений пока не было.</p>
+  {% endif %}
+
+  <h2>Аудит-журнал инцидента</h2>
+  <div class="table-wrap">
+    <table class="audit">
+      <thead><tr><th scope="col">№</th><th scope="col">Когда</th><th scope="col">Кто</th><th scope="col">Событие</th><th scope="col">Подробности</th></tr></thead>
+      <tbody>
+        {% for e in audit %}
+        <tr data-entry="{{ e.entry_id }}">
+          <td class="num">{{ e.entry_id }}</td>
+          <td class="time">{{ e.at | utc_iso }}</td>
+          <td>{{ e.actor }}</td>
+          <td>{{ e.event | label('event') }}</td>
+          <td>{% if e.details.comment %}«{{ e.details.comment }}»{% endif %}{% if e.details.by_non_assignee %} <span class="badge warn">не ответственный (ответственный — {{ e.details.assignee }})</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p><a href="/audit?incident={{ inc.incident_id | urlencode }}">Все записи в журнале аудита →</a></p>
+</section>

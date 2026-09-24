@@ -1,0 +1,37 @@
+{#- Блок решений карточки. Все формы решений отправляются сюда же (hx-target="#decisions"),
+    и сервер возвращает этот блок целиком: с новым состоянием, с ошибкой рядом с нужной
+    формой (введённые значения сохранены) или с вопросом-подтверждением. -#}
+{% from "macros.html" import status, action_state with context %}
+<div id="decisions" class="decisions">
+  {% with stamp = {"incident_id": inc.incident_id, "v": inc.version, "av": inc.action.version if inc.action else "", "changed": False} %}
+    {% include "fragments/_stamp.html" %}
+  {% endwith %}
+
+  {% if question %}
+    {% if question.kind == 'confirm' %}{% include "fragments/_confirm_question.html" %}
+    {% else %}{% include "fragments/_not_assignee_question.html" %}{% endif %}
+  {% endif %}
+
+  <div class="state-line">
+    {{ status(inc.status) }}
+    {% if inc.resolution %}<span class="badge res">{{ inc.resolution | label('resolution') }}</span>{% endif %}
+    <span>Ответственный: <strong class="assignee">{{ inc.assignee or 'не назначен' }}</strong></span>
+    <span>Действие: {{ action_state(inc.action) }}</span>
+    <span class="muted">версия {{ inc.version }}</span>
+  </div>
+
+  <div class="panels">
+    <section class="panel" id="panel-assign">
+      <h2>Ответственный</h2>
+      {% include "fragments/_assign_form.html" %}
+    </section>
+    <section class="panel" id="panel-status">
+      <h2>Статус</h2>
+      {% include "fragments/_status_form.html" %}
+    </section>
+    <section class="panel" id="panel-action">
+      <h2>Предложенное действие</h2>
+      {% include "fragments/_action_panel.html" %}
+    </section>
+  </div>
+</div>

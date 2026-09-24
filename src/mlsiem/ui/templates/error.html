@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Ошибка{% endblock %}
+{% block content %}
+<section class="empty-state">
+  <h1>Не получилось</h1>
+  <p>{{ message }}.</p>
+  <p><a href="/">На панель</a></p>
+</section>
+{% endblock %}

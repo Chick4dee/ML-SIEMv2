@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,16 @@ from mlsiem.data.config import ConfigError, _get
 DEFAULT_SOC_CONFIG = Path("configs/soc.yaml")
 SEVERITY_LEVELS = ("low", "medium", "high", "critical")
 ACTION_TYPES = ("block_source_ip", "isolate_host", "observe", "manual_review")
+# Роли именованных сетей (фича 003). Метку «подозрительный источник» дают только victims и
+# background, остальные — чтобы подписать адрес в карточке
+NETWORK_ROLES = ("victims", "background", "infrastructure", "other")
+REFRESH_RANGE = (3, 300)
+# Сети по умолчанию — если в конфиге (например, от фичи 002) нет раздела networks. Это
+# наблюдения прогона 002: оттуда пришли 17 из 66 «атак», на деле — ответные направления
+DEFAULT_NETWORKS: tuple[dict[str, Any], ...] = (
+    {"name": "жертвы UNSW-NB15", "role": "victims", "cidrs": ["149.171.126.0/24"]},
+    {"name": "фон UNSW-NB15", "role": "background", "cidrs": ["59.166.0.0/24"]},
+)
 # Какие условия можно писать в `when` и какого они типа
 RULE_CONDITIONS: dict[str, type] = {
     "protected": bool,
@@ -43,6 +55,25 @@ class Rule:
 
 
 @dataclass(frozen=True)
+class NetworkConfig:
+    """Именованная сеть: «жертвы», «фон» и т. п. (FR-018)."""
+
+    name: str
+    role: str
+    cidrs: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+
+
+@dataclass(frozen=True)
+class UiConfig:
+    """Настройки консоли: интервал опроса и размеры страниц (data-model 003)."""
+
+    refresh_seconds: int = 10
+    page_size: int = 50
+    recent_alerts: int = 20
+    alerts_page_size: int = 50
+
+
+@dataclass(frozen=True)
 class SocConfig:
     db: Path
     runs_dir: Path
@@ -53,6 +84,8 @@ class SocConfig:
     protected_ips: tuple[str, ...]
     rules: tuple[Rule, ...]
     raw: dict[str, Any]
+    networks: tuple[NetworkConfig, ...] = ()
+    ui: UiConfig = dc_field(default_factory=UiConfig)
 
 
 def _level(value: Any, key: str) -> str:
@@ -101,6 +134,53 @@ def _parse_rule(raw_rule: Any, i: int) -> Rule:
     return Rule(id=rule_id, when=dict(when), action=action)
 
 
+def _parse_network(raw_net: Any, i: int) -> NetworkConfig:
+    key = f"networks[{i}]"
+    if not isinstance(raw_net, dict):
+        raise ConfigError(f"ключ {key}: сеть должна быть словарём с полями name, role, cidrs")
+    name = raw_net.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ConfigError(f"ключ {key}.name: нужна непустая строка — название сети")
+    role = raw_net.get("role")
+    if role not in NETWORK_ROLES:
+        raise ConfigError(
+            f"ключ {key}.role (сеть «{name}»): роль должна быть одной из {list(NETWORK_ROLES)}, "
+            f"а записано {role!r}"
+        )
+    cidrs_raw = raw_net.get("cidrs")
+    if not isinstance(cidrs_raw, list) or not cidrs_raw:
+        raise ConfigError(f"ключ {key}.cidrs (сеть «{name}»): нужен непустой список диапазонов")
+    cidrs = []
+    for c in cidrs_raw:
+        # strict=False: «10.0.0.5/24» — это опечатка человека, а не повод падать; берём сеть
+        try:
+            cidrs.append(ipaddress.ip_network(str(c), strict=False))
+        except ValueError as exc:
+            raise ConfigError(
+                f"ключ {key}.cidrs (сеть «{name}»): {c!r} — не диапазон адресов ({exc})"
+            ) from exc
+    return NetworkConfig(name=name.strip(), role=role, cidrs=tuple(cidrs))
+
+
+def _parse_ui(raw_ui: Any) -> UiConfig:
+    if raw_ui is None:
+        return UiConfig()
+    if not isinstance(raw_ui, dict):
+        raise ConfigError("ключ ui: нужен словарь настроек консоли")
+    wrapped = {"ui": {**UiConfig().__dict__, **raw_ui}}
+    values = {k: _get(wrapped, f"ui.{k}", int) for k in UiConfig.__dataclass_fields__}
+    lo, hi = REFRESH_RANGE
+    if not lo <= values["refresh_seconds"] <= hi:
+        raise ConfigError(
+            f"ключ ui.refresh_seconds: интервал обновления должен быть от {lo} до {hi} секунд, "
+            f"а записано {values['refresh_seconds']}"
+        )
+    for k in ("page_size", "recent_alerts", "alerts_page_size"):
+        if values[k] < 1:
+            raise ConfigError(f"ключ ui.{k}: нужно целое ≥ 1, а записано {values[k]}")
+    return UiConfig(**values)
+
+
 def parse_soc_config(raw: Any) -> SocConfig:
     if not isinstance(raw, dict):
         raise ConfigError("конфиг SOC: ожидался словарь верхнего уровня")
@@ -129,6 +209,11 @@ def parse_soc_config(raw: Any) -> SocConfig:
     if len(set(ids)) != len(ids):
         raise ConfigError(f"ключ playbook.rules: id правил повторяются: {ids}")
 
+    # Раздел networks необязателен (конфиги 002 его не знают); пустой список — «без сетей»
+    networks_raw = raw.get("networks", list(DEFAULT_NETWORKS))
+    if not isinstance(networks_raw, list):
+        raise ConfigError("ключ networks: нужен список сетей (name, role, cidrs)")
+
     port = _get(raw, "api.port", int)
     if not 0 < port < 65536:
         raise ConfigError(f"ключ api.port: порт вне диапазона 1–65535 ({port})")
@@ -143,6 +228,8 @@ def parse_soc_config(raw: Any) -> SocConfig:
         protected_ips=tuple(protected),
         rules=rules,
         raw=raw,
+        networks=tuple(_parse_network(n, i) for i, n in enumerate(networks_raw)),
+        ui=_parse_ui(raw.get("ui")),
     )
 
 

@@ -1,0 +1,12 @@
+{#- «Штамп» открытой карточки: раз в refresh секунд сверяет версии инцидента и действия с теми,
+    что были при отрисовке. Карточку целиком опрос не перерисовывает — иначе стёрся бы
+    недописанный комментарий; вместо этого появляется полоса с предложением обновить. -#}
+<div id="stamp" hx-get="/fragments/incidents/{{ stamp.incident_id | urlencode }}/stamp?v={{ stamp.v }}&amp;av={{ stamp.av }}" hx-trigger="every {{ refresh }}s" hx-swap="outerHTML">
+  {% if stamp.changed %}
+  <div class="banner warn" role="status">
+    Инцидент изменён другим аналитиком —
+    <a href="/incidents/{{ stamp.incident_id | urlencode }}">обновить карточку</a>
+    (введённый текст скопируйте заранее).
+  </div>
+  {% endif %}
+</div>

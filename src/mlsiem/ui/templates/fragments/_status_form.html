@@ -1,0 +1,39 @@
+{#- Смена статуса: только допустимые переходы 002 (FR-013). Резолюция при закрытии обязательна
+    уже в форме (required), а сервер всё равно проверяет её в store. -#}
+{% from "macros.html" import csrf, error with context %}
+{% set fv = values.get('status', {}) %}
+{% set url = "/incidents/" ~ (inc.incident_id | urlencode) ~ "/status" %}
+{% set allowed = transitions[inc.status] %}
+{% set retry = errors.get('_conflict') == 'status' %}
+{{ error(errors, 'status') }}
+{% if errors.get('status') and not analyst %}<p><a class="btn" href="/analyst?next=/incidents/{{ inc.incident_id | urlencode }}">представиться</a></p>{% endif %}
+
+{% if not allowed %}
+<p class="muted">Инцидент закрыт ({{ inc.resolution | label('resolution') }}) — статус больше не меняется.
+  Ответственного по-прежнему можно поменять.</p>
+{% else %}
+  {% if 'in_progress' in allowed %}
+  <form class="inline" method="post" action="{{ url }}" hx-post="{{ url }}" hx-target="#decisions" hx-swap="outerHTML">
+    {{ csrf() }}
+    <input type="hidden" name="expected_version" value="{{ inc.version }}">
+    <input type="hidden" name="status" value="in_progress">
+    <button type="submit">{{ 'повторить на новой версии: ' if retry and fv.get('status') == 'in_progress' else '' }}взять в работу</button>
+  </form>
+  {% endif %}
+
+  <form method="post" action="{{ url }}" hx-post="{{ url }}" hx-target="#decisions" hx-swap="outerHTML">
+    {{ csrf() }}
+    <input type="hidden" name="expected_version" value="{{ inc.version }}">
+    <input type="hidden" name="status" value="closed">
+    <fieldset>
+      <legend>Закрыть с резолюцией</legend>
+      {% for r in resolutions %}
+      <label><input type="radio" name="resolution" value="{{ r }}" required{% if fv.get('resolution') == r %} checked{% endif %}> {{ r | label('resolution') }}</label>
+      {% endfor %}
+    </fieldset>
+    <label>Комментарий
+      <textarea name="comment" rows="2">{{ fv.get('comment', '') }}</textarea>
+    </label>
+    <button type="submit">{{ 'повторить на новой версии' if retry and fv.get('status') == 'closed' else 'закрыть инцидент' }}</button>
+  </form>
+{% endif %}

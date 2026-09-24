@@ -1,0 +1,44 @@
+{#- Алерты инцидента постранично (FR-010). Вероятности по классам подгружаются только при
+    раскрытии алерта: они лежат в verdicts.parquet, и читать их для всех строк незачем.
+    Без JS внутри <details> — обычная ссылка на тот же фрагмент. -#}
+{% from "macros.html" import pager with context %}
+<div id="alerts" class="alerts-box">
+  <p class="count">Всего алертов: <strong>{{ alerts.total }}</strong>{% if alerts.pages > 1 %}, страница {{ alerts.page }} из {{ alerts.pages }}{% endif %}</p>
+  {% if alerts['items'] %}
+  <div class="table-wrap">
+    <table class="alerts">
+      <thead>
+        <tr>
+          <th scope="col">Начало потока (время трафика)</th>
+          <th scope="col">Источник</th>
+          <th scope="col">Цель</th>
+          <th scope="col">Протокол</th>
+          <th scope="col">Класс</th>
+          <th scope="col">Уверенность</th>
+          <th scope="col">Вероятности детектора</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in alerts['items'] %}
+        {% set probs_url = "/fragments/alerts/" ~ (a.run_id | urlencode) ~ "/" ~ (a.flow_uid | urlencode | replace('%2F', '/')) ~ "/probs" %}
+        <tr data-flow="{{ a.flow_uid }}">
+          <td class="time">{{ a.first_seen_ms | utc_ms }}</td>
+          <td class="ip">{{ a.src_ip }}:{{ a.src_port }}</td>
+          <td class="ip">{{ a.dst_ip }}:{{ a.dst_port }}</td>
+          <td>{{ a.protocol | proto }}</td>
+          <td>{{ a.predicted_class }}</td>
+          <td class="num">{{ '%.3f' | format(a.attack_score) }}</td>
+          <td>
+            <details hx-get="{{ probs_url }}" hx-trigger="toggle once" hx-target="find .probs" hx-swap="innerHTML">
+              <summary>показать</summary>
+              <div class="probs"><a href="{{ probs_url }}">вероятности по классам</a></div>
+            </details>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {{ pager(alerts.page, alerts.pages, alerts.href, alerts.hx, '#alerts') }}
+  {% endif %}
+</div>

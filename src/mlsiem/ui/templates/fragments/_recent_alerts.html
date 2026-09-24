@@ -1,0 +1,27 @@
+{#- Лента последних алертов прогона — по времени потока, новые сверху (FR-021). -#}
+<section id="recent-alerts" class="recent-alerts"
+         hx-get="/fragments/recent-alerts?run={{ run_id | urlencode }}" hx-trigger="every {{ refresh }}s" hx-swap="outerHTML"
+         hx-headers='{{ {"If-None-Match": recent_etag} | tojson }}'>
+  <h2>Последние алерты</h2>
+  {% if not recent %}
+  <p class="muted">Алертов в прогоне нет.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table class="alerts">
+      <thead><tr><th scope="col">Время трафика</th><th scope="col">Класс</th><th scope="col">Уверенность</th><th scope="col">Источник</th><th scope="col">Цель</th><th scope="col">Инцидент</th></tr></thead>
+      <tbody>
+        {% for a in recent %}
+        <tr>
+          <td class="time">{{ a.first_seen_ms | utc_ms }}</td>
+          <td>{{ a.predicted_class }}</td>
+          <td class="num">{{ '%.3f' | format(a.attack_score) }}</td>
+          <td class="ip">{{ a.src_ip }}:{{ a.src_port }}</td>
+          <td class="ip">{{ a.dst_ip }}:{{ a.dst_port }}</td>
+          <td><a href="/incidents/{{ a.incident_id | urlencode }}">{{ a.incident_id }}</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>

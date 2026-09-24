@@ -1,0 +1,40 @@
+{#- Мелкие повторяющиеся куски разметки: бейджи, скрытые поля форм, пагинация. -#}
+
+{% macro csrf() -%}
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+{%- endmacro %}
+
+{% macro sev(s) -%}
+<span class="badge sev-{{ s }}">{{ s | label('severity') }}</span>
+{%- endmacro %}
+
+{% macro status(s) -%}
+<span class="badge st-{{ s }}">{{ s | label('status') }}</span>
+{%- endmacro %}
+
+{% macro action_state(a) -%}
+{% if a %}<span class="badge act-{{ a.state }}" title="{{ a.action_type | label('action_type') }}">{{ a.state | label('action_state') }}</span>{% else %}—{% endif %}
+{%- endmacro %}
+
+{% macro flag_badges(flags) -%}
+{% for f in flags %}<span class="badge flag" title="{{ f.explanation }}">⚑ {% if f.kind == 'network' %}{{ f.network_name }}{% else %}цель в других ({{ f.related_incidents | length }}){% endif %}</span>{% endfor %}
+{%- endmacro %}
+
+{% macro long_list(items, n=3) -%}
+{% if items | length > n %}<details class="long"><summary>{{ items | short_list(n) }}</summary>{{ items | join(', ') }}</details>{% else %}{{ items | short_list(n) }}{% endif %}
+{%- endmacro %}
+
+{% macro error(errors, section) -%}
+{% if errors and errors.get(section) %}{% with message = errors[section] %}{% include "fragments/_error.html" %}{% endwith %}{% endif %}
+{%- endmacro %}
+
+{#- Пагинация: href — для работы без JS, hx_url (если есть) — для обмена фрагментом. -#}
+{% macro pager(page, pages, href, hx_url=None, target=None, push=False) -%}
+{% if pages > 1 %}
+<nav class="pager" aria-label="Страницы">
+  {% if page > 1 %}<a href="{{ href(page - 1) }}"{% if hx_url %} hx-get="{{ hx_url(page - 1) }}" hx-target="{{ target }}" hx-swap="outerHTML"{% if push %} hx-push-url="true"{% endif %}{% endif %} rel="prev">← назад</a>{% endif %}
+  <span>страница {{ page }} из {{ pages }}</span>
+  {% if page < pages %}<a href="{{ href(page + 1) }}"{% if hx_url %} hx-get="{{ hx_url(page + 1) }}" hx-target="{{ target }}" hx-swap="outerHTML"{% if push %} hx-push-url="true"{% endif %}{% endif %} rel="next">дальше →</a>{% endif %}
+</nav>
+{% endif %}
+{%- endmacro %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Панель{% endblock %}
+{% block content %}
+{% if not run_id %}
+  {% include "fragments/_empty.html" %}
+{% else %}
+{% set run = d.run %}
+<h1>Обзор прогона <code>{{ run_id }}</code></h1>
+{% for w in warnings %}<p class="warning" role="status">{{ w }}</p>{% endfor %}
+
+<section class="run-summary">
+  <dl class="facts">
+    <div><dt>Источник</dt><dd>{{ run.source }}</dd></div>
+    <div><dt>Потоков</dt><dd class="num">{{ run.n_flows }}</dd></div>
+    <div><dt>Алертов</dt><dd class="num">{{ run.n_alerts }}</dd></div>
+    <div><dt>Инцидентов</dt><dd class="num">{{ run.n_incidents }}</dd></div>
+    <div><dt>Детектор</dt><dd><code>{{ run.detector_version }}</code></dd></div>
+    <div><dt>Прогон сделан</dt><dd class="time">{{ run.started_at | utc_iso }}</dd></div>
+    {% if run.summary.get('alerts_true_share') is not none %}
+    <div><dt>Алертов на настоящих атаках (по разметке)</dt><dd>{{ run.summary.alerts_true_share | percent }}</dd></div>
+    {% endif %}
+  </dl>
+  {% for w in run.warnings %}<p class="warning">{{ w }}</p>{% endfor %}
+</section>
+
+{% include "fragments/_dashboard_counters.html" %}
+{% include "fragments/_recent_alerts.html" %}
+{% endif %}
+{% endblock %}
