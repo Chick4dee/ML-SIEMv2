@@ -95,8 +95,8 @@ stages:
       nfiles: 162
     - path: src/mlsiem/data/split.py
       hash: md5
-      md5: 39536b14a2196b72b846c846a3320799
-      size: 15142
+      md5: 0ea597e7eb3ea79559da669f47f43399
+      size: 15789
     params:
       configs/data.yaml:
         split:
@@ -140,8 +140,8 @@ stages:
       nfiles: 162
     - path: src/mlsiem/data/split.py
       hash: md5
-      md5: 39536b14a2196b72b846c846a3320799
-      size: 15142
+      md5: 0ea597e7eb3ea79559da669f47f43399
+      size: 15789
     params:
       configs/data.yaml:
         split:
@@ -169,12 +169,12 @@ stages:
     outs:
     - path: data/splits/unsw_cross_day.json
       hash: md5
-      md5: 6b86ed28180364c38ebdba07cc0f8238
-      size: 9861
+      md5: 850c772866adf80ff9e5ebce15925845
+      size: 10126
     - path: data/splits/unsw_cross_day.parquet
       hash: md5
-      md5: 42619def41ee22d658550cac1fbee6a2
-      size: 980785
+      md5: 114a63dc57ef6dc295a45a33f980383d
+      size: 975148
   split@ctu13_scenario:
     cmd: uv run mlsiem data split --name ctu13_scenario
     deps:
@@ -185,8 +185,8 @@ stages:
       nfiles: 28
     - path: src/mlsiem/data/split.py
       hash: md5
-      md5: 39536b14a2196b72b846c846a3320799
-      size: 15142
+      md5: 0ea597e7eb3ea79559da669f47f43399
+      size: 15789
     params:
       configs/data.yaml:
         split:
@@ -259,8 +259,8 @@ stages:
       nfiles: 162
     - path: data/splits/unsw_cross_day.parquet
       hash: md5
-      md5: 42619def41ee22d658550cac1fbee6a2
-      size: 980785
+      md5: 114a63dc57ef6dc295a45a33f980383d
+      size: 975148
     - path: src/mlsiem/data/audit.py
       hash: md5
       md5: 9fdb94d3e81ec1ea5470681a0c44c064
@@ -276,8 +276,8 @@ stages:
     outs:
     - path: data/audit/unsw_cross_day.parquet
       hash: md5
-      md5: 5326159f90a5094defb783089dd457b2
-      size: 2965
+      md5: e747b802a9af6a3e09550b9c49bd6f10
+      size: 4194
   audit@ctu13_scenario:
     cmd: uv run mlsiem data audit --split ctu13_scenario
     deps:
@@ -339,8 +339,8 @@ stages:
     deps:
     - path: data/audit
       hash: md5
-      md5: d71bf7017810efaf0275c172be9aae19.dir
-      size: 11585
+      md5: a7adaf262b832f70e33fa4f7ad9482e9.dir
+      size: 12814
       nfiles: 3
     - path: data/compare_v1.csv
       hash: md5
@@ -356,8 +356,8 @@ stages:
       size: 6130
     - path: data/splits
       hash: md5
-      md5: 7da12bf25b856f185b632ea342c60d3b.dir
-      size: 2082768
+      md5: 7cd0f182e30e32f9ba3d4d5777a46ad2.dir
+      size: 2077396
       nfiles: 6
     - path: src/mlsiem/data/report
       hash: md5
@@ -367,9 +367,9 @@ stages:
     outs:
     - path: reports/data_quality.html
       hash: md5
-      md5: 6df9869c309006993b8f180f84bb9ca4
-      size: 311790
+      md5: 84af7081b9307bc881d2673db49d17ea
+      size: 358976
     - path: reports/data_quality.md
       hash: md5
-      md5: e9dfbebaf2d0313d6b791ed827db298f
-      size: 6168
+      md5: 8702afd21546ed2213f330b98f39a810
+      size: 6062

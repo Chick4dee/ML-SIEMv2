@@ -70,12 +70,15 @@ def test_unsw_time_boundaries_and_gap():
 def test_unsw_cross_day():
     assigned, parts = compute_split(_two_days(), "unsw_cross_day", CFG)
     check_invariants(assigned, parts, "unsw_cross_day", GAP)
-    day2 = assigned.filter(pl.col("capture_id") == "unsw_17-2-2015_01")
-    assert day2["part"].to_list() == ["test"] * 300
+    # первый день целиком в train
     day1 = assigned.filter(pl.col("capture_id") == "unsw_22-1-2015_01")
-    assert set(day1["part"].drop_nulls().unique().to_list()) == {"train", "val"}
-    b = 170 * MIN  # квантиль 0.85 из 200
-    assert day1.filter(pl.col(FIRST) < b - GAP)["part"].unique().to_list() == ["train"]
+    assert day1["part"].to_list() == ["train"] * 200
+    # второй день: первые 15% (45 из 300 потоков) — val, дальше test, между ними зазор
+    day2 = assigned.filter(pl.col("capture_id") == "unsw_17-2-2015_01").sort(FIRST)
+    b = 10**10 + 45 * MIN
+    assert day2.filter(pl.col(FIRST) < b - GAP)["part"].unique().to_list() == ["val"]
+    assert day2.filter(pl.col(FIRST) > b + GAP)["part"].unique().to_list() == ["test"]
+    assert day2["part"].null_count() > 0
 
 
 def _ctu(scenarios=range(1, 14)):

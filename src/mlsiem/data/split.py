@@ -4,8 +4,8 @@
 - `unsw_time` — внутри КАЖДОГО дня UNSW потоки идут по времени, границы — по квантилям
   числа потоков (0.70 / 0.85), а не по часам: трафик неравномерный, и «по часам» части
   получились бы непредсказуемого размера;
-- `unsw_cross_day` — первый день → train/val (граница по квантилю 0.85), второй день
-  целиком → test. Жёстче: модель видит «чужой» день;
+- `unsw_cross_day` — первый день целиком → train, второй день: первые 15% потоков → val,
+  остальное → test (с зазором). Жёстче: модель учится на одном дне, а проверяется на другом;
 - `ctu13_scenario` — сценарий CTU-13 целиком в одной части (из конфига). В test обязано
   быть семейство ботнета, которого нет в train: так проверяется обобщение на новую малварь.
 
@@ -115,28 +115,29 @@ def compute_split(
 
     elif name == "unsw_cross_day":
         days = sorted(flows["group"].unique().to_list(), key=_day_key)
-        if len(days) < 2:
-            raise ValueError(f"для unsw_cross_day нужны два дня UNSW, а есть {days}")
-        # Первый день делится на train/val по той же логике с зазором (0.85 = вторая граница)
+        if len(days) != 2:
+            raise ValueError(f"для unsw_cross_day нужны ровно два дня UNSW, а есть {days}")
+        # Первый день целиком — train. Делить его на train/val нельзя: атаки в разметке дня
+        # 22-1-2015 есть только в первых ~40% потоков, и val из конца дня был бы чистым benign
         first_day = flows.filter(pl.col("group") == days[0])
-        bound = _boundary(first_day, split_cfg.quantiles[1])
-        assigned, intervals = _cut_day(first_day, [bound], ["train", "val"], gap)
+        chunks.append(first_day.with_columns(pl.lit("train").alias("part")))
+        parts_info["train"]["groups"].append(days[0])
+        parts_info["train"]["intervals"].append(
+            {
+                "group": days[0],
+                "start_ms": int(first_day[FIRST].min()),
+                "end_ms": int(first_day[LAST].max()) + 1,
+            }
+        )
+        # Второй день: начало (доля 1 − q2, т. е. 15%) — val для подбора порога, остальное —
+        # test, между ними тот же зазор. Модель по-прежнему не видит второй день при обучении
+        second_day = flows.filter(pl.col("group") == days[1])
+        bound = _boundary(second_day, 1 - split_cfg.quantiles[1])
+        assigned, intervals = _cut_day(second_day, [bound], ["val", "test"], gap)
         chunks.append(assigned)
-        for p, (s, e) in intervals.items():
-            parts_info[p]["groups"].append(days[0])
-            parts_info[p]["intervals"].append({"group": days[0], "start_ms": s, "end_ms": e})
-        # Остальные дни — целиком в test; внутри дня границ нет, значит и зазора нет
-        for day in days[1:]:
-            day_flows = flows.filter(pl.col("group") == day)
-            chunks.append(day_flows.with_columns(pl.lit("test").alias("part")))
-            parts_info["test"]["groups"].append(day)
-            parts_info["test"]["intervals"].append(
-                {
-                    "group": day,
-                    "start_ms": int(day_flows[FIRST].min()),
-                    "end_ms": int(day_flows[LAST].max()) + 1,
-                }
-            )
+        for p, (st, en) in intervals.items():
+            parts_info[p]["groups"].append(days[1])
+            parts_info[p]["intervals"].append({"group": days[1], "start_ms": st, "end_ms": en})
 
     elif name == "ctu13_scenario":
         mapping = {str(s): p for p, scenarios in split_cfg.ctu13_parts.items() for s in scenarios}
