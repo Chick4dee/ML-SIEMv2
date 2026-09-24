@@ -373,3 +373,53 @@ stages:
       hash: md5
       md5: 8702afd21546ed2213f330b98f39a810
       size: 6062
+  train_detector:
+    cmd: uv run mlsiem detect train
+    deps:
+    - path: data/flows/unsw
+      hash: md5
+      md5: b4c3d263a6bfefef534f6e8bdc58963b.dir
+      size: 184763685
+      nfiles: 162
+    - path: data/splits/unsw_cross_day.parquet
+      hash: md5
+      md5: 114a63dc57ef6dc295a45a33f980383d
+      size: 975148
+    - path: data/splits/unsw_time.parquet
+      hash: md5
+      md5: b4edf94a088781015384864f136f1ca9
+      size: 956645
+    - path: src/mlsiem/detect
+      hash: md5
+      md5: afeaf14aab2616ed4f238d9dc352f8c0.dir
+      size: 112103
+      nfiles: 14
+    params:
+      configs/detect.yaml:
+        candidates:
+          logreg:
+            C: 1.0
+            max_iter: 1000
+            class_weight: balanced
+          lgbm:
+            n_estimators: 400
+            learning_rate: 0.05
+            num_leaves: 63
+            class_weight: balanced
+        output: models/detector
+        seed: 42
+        selection:
+          metric: macro_pr_auc_val
+          min_gain: 0.01
+        split: unsw_time
+        transfer_split: unsw_cross_day
+    outs:
+    - path: models/detector
+      hash: md5
+      md5: fa0eb55488130164346d3625da8cac54.dir
+      size: 27616149
+      nfiles: 3
+    - path: reports/detector_experiment.md
+      hash: md5
+      md5: d6f2d430750af5bd7e67d34baea96d67
+      size: 2701

@@ -100,3 +100,25 @@ stages:
     outs:
       - reports/data_quality.html
       - reports/data_quality.md
+
+  # Фича 002: эксперимент детектора (logreg vs lgbm на unsw_time, перенос на unsw_cross_day).
+  # MLflow (mlflow.db и mlruns/) — вне DVC и git: это журнал запусков, а не выход конвейера;
+  # всё нужное для воспроизведения лежит в models/detector/experiment.json и отчёте.
+  train_detector:
+    cmd: uv run mlsiem detect train
+    deps:
+      - data/flows/unsw
+      - data/splits/unsw_time.parquet
+      - data/splits/unsw_cross_day.parquet
+      - src/mlsiem/detect
+    params:
+      - configs/detect.yaml:
+          - split
+          - transfer_split
+          - seed
+          - selection
+          - candidates
+          - output
+    outs:
+      - models/detector
+      - reports/detector_experiment.md

@@ -26,3 +26,15 @@ __pycache__/
 *.pcapng
 !tests/fixtures/*.pcap
 !tests/fixtures/*.pcapng
+
+# Фича 002
+# SOC-состояние аналитика (БД инцидентов, вердикты прогонов) — рабочие данные, не выход
+# конвейера: ни в git, ни в DVC
+/var/
+# Журнал экспериментов MLflow — локальный, вне git и DVC
+/mlruns/
+mlflow.db
+# Артефакт детектора — выход DVC-стадии train_detector (в git только .gitignore и *.dvc)
+/models/*
+!/models/.gitignore
+!/models/*.dvc

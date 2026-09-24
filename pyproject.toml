@@ -20,6 +20,12 @@ dependencies = [
     "pyyaml",
     "psutil",
     "dvc>=3,<4",
+    # фича 002: кандидат-детектор, журнал экспериментов, API аналитика, артефакт модели
+    "lightgbm",
+    "mlflow",
+    "fastapi",
+    "uvicorn",
+    "joblib",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +33,8 @@ dev = [
     "pytest",
     "ruff",
     "scapy",
+    # TestClient FastAPI работает поверх httpx
+    "httpx",
 ]
 
 [project.scripts]
@@ -42,9 +50,13 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.flake8-bugbear]
+# Depends/Query/Header в значениях по умолчанию — штатный способ объявлять параметры FastAPI
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "slow: тесты на реальных датасетах (нужны PCAP на диске A:)",
+    "slow: тесты на реальных датасетах — данные 001 (data/) и PCAP на диске A:",
 ]
 addopts = "-m 'not slow'"

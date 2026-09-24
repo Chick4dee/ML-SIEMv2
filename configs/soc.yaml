@@ -1,0 +1,46 @@
+# SOC-часть цепочки (фича 002, `mlsiem soc run|serve|status`).
+# Контракт — specs/002-detection-incident-chain/contracts/cli.md, решения — research R8–R12.
+
+# SQLite-база инцидентов, алертов, действий и аудит-журнала (рабочее состояние аналитика)
+db: var/soc.db
+# Каталог прогонов: var/runs/<run_id>/verdicts.parquet (и flows.parquet для PCAP)
+runs_dir: var/runs
+
+# API аналитика. Слушаем только локальный адрес — аутентификации в этой фиче нет
+api: {host: 127.0.0.1, port: 8000}
+
+# Группировка алертов в инциденты по ключу (src_ip, класс атаки): новый инцидент
+# открывается, если между соседними алертами ключа прошло больше window_ms (15 минут)
+grouping: {window_ms: 900000}
+
+severity:
+  # Сколько алертов в инциденте поднимает серьёзность на одну ступень (не выше critical)
+  bump_at: 100
+  # Базовый уровень по классу атаки: low | medium | high | critical
+  base:
+    reconnaissance: low
+    analysis: low
+    fuzzers: medium
+    generic: medium
+    dos: medium
+    exploits: high
+    shellcode: high
+    backdoor: high
+    worms: high
+
+# Адреса, которые нельзя блокировать и изолировать ни при каких условиях — для них
+# предлагается только ручной разбор (FR-020)
+protected_ips: []
+
+playbook:
+  # Правила проверяются сверху вниз, срабатывает первое подходящее — поэтому
+  # предложение для одного и того же инцидента всегда одно и то же (FR-017).
+  # Условия when: protected (bool), class_in (список классов), max_targets (не больше
+  # N уникальных целей), min_severity (серьёзность не ниже). Пустой when — подходит всегда.
+  rules:
+    - {id: protected, when: {protected: true}, action: manual_review}
+    - {id: intrusion_single_target, when: {class_in: [exploits, shellcode, backdoor, worms], max_targets: 1}, action: isolate_host}
+    - {id: intrusion_many_targets, when: {class_in: [exploits, shellcode, backdoor, worms]}, action: block_source_ip}
+    - {id: noisy_attack, when: {class_in: [dos, generic, fuzzers]}, action: block_source_ip}
+    - {id: recon, when: {class_in: [reconnaissance, analysis], min_severity: medium}, action: block_source_ip}
+    - {id: default, when: {}, action: observe}
