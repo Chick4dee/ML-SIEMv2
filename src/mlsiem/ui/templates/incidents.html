@@ -49,7 +49,7 @@
       <select name="attack_class">
         <option value="">все</option>
         {% for c in classes %}
-        <option value="{{ c }}"{% if c == view.attack_class %} selected{% endif %}>{{ c }}</option>
+        <option value="{{ c }}"{% if c == view.attack_class %} selected{% endif %}>{{ c | cls }}</option>
         {% endfor %}
         {% if view.attack_class and view.attack_class not in classes %}
         <option value="{{ view.attack_class }}" selected>{{ view.attack_class }}</option>

@@ -209,9 +209,102 @@ def cmd_detect_train(args, cfg) -> int:
     return EXIT_OK
 
 
+def cmd_detect_ensemble(args, cfg) -> int:
+    """Эксперимент 004: эксперты + мета-слой против лучшего одиночного эксперта."""
+    from mlsiem.detect.artifact import DetectorLoadError
+    from mlsiem.detect.ensemble import REPORT_NAME, VARIANT_TITLES, run_ensemble_experiment
+
+    try:
+        exp = run_ensemble_experiment(
+            cfg,
+            data_dir=Path(args.data_dir),
+            reports_dir=Path(args.reports_dir),
+            mlflow_dir=Path(args.mlflow_dir),
+        )
+    except DetectorLoadError as exc:
+        log.error("Классификатор не загружается: %s", exc)
+        return EXIT_ERROR
+
+    def f(v) -> str:
+        return "—" if v is None else f"{v:.4f}"
+
+    def p(v) -> str:
+        return "—" if v is None else f"{v:.1%}"
+
+    _out(
+        f"Эксперимент ансамбля на {exp['split']} (сид {exp['seed']}), "
+        f"версия {exp['ensemble_version']}"
+    )
+    _out(
+        f"  {'вариант':<38} {'macro val':>9} {'macro test':>10} {'атака/нет val':>13} "
+        f"{'порог':>7} {'F1 test':>8}"
+    )
+    for v in exp["variants"]:
+        _out(
+            f"  {VARIANT_TITLES.get(v['name'], v['name']):<38} {f(v['val']['macro_pr_auc']):>9} "
+            f"{f(v['test']['macro_pr_auc']):>10} {f(v['val']['pr_auc_binary']):>13} "
+            f"{v['threshold']:>7.4f} {f(v['test']['binary']['f1']):>8}"
+        )
+    an = exp["experts"]["anomaly"]
+    _out("Детектор аномалий (PR-AUC «атака/не атака» val / test, норма val выше порога):")
+    for c in an["candidates"]:
+        _out(
+            f"  {c['name']:<12} {f(c['val']['pr_auc_binary'])} / {f(c['test']['pr_auc_binary'])}, "
+            f"{p(c['val']['benign_above_threshold'])}"
+        )
+    _out(f"  выбран {an['winner']} — {an['selection_text']}")
+    cands = exp["config"]["meta"]["candidates"]
+    _out("Скрытый класс — поимка val / test (классификатор без класса | аномалии | варианты):")
+    for h in exp["hidden_class"]:
+        c = h["catch"]
+        rest = ", ".join(
+            f"{v} {p(h['variants'][v]['val'])} / {p(h['variants'][v]['test'])}" for v in cands
+        )
+        _out(
+            f"  {h['class']:<10} {p(c['classifier_without_class']['val'])} / "
+            f"{p(c['classifier_without_class']['test'])} | {p(c['anomaly']['val'])} / "
+            f"{p(c['anomaly']['test'])} | {rest}"
+        )
+    sel = exp["selection"]
+    condition = {
+        "macro_gain": "macro_gain (прирост macro PR-AUC)",
+        "unknown_gain": "unknown_gain (поимка скрытых классов)",
+        "none": "ни одно — одиночный эксперт",
+    }.get(sel["condition"], sel["condition"])
+    _out(f"Выбрано: {sel['selected']}; условие: {condition}")
+    _out(f"  {sel['text']}")
+    flagged = ((exp["audit"].get("anomaly") or {}).get("flagged_features")) or []
+    if flagged:
+        _out(f"Аудит: подозрение на артефакт — признаки {', '.join(flagged)} (см. отчёт)")
+    else:
+        _out("Аудит: признаков, в одиночку отделяющих атаки, не найдено")
+    _out(
+        f"Артефакты: {cfg.output_anomaly}, {cfg.output_ensemble}; "
+        f"отчёт: {Path(args.reports_dir) / REPORT_NAME}"
+    )
+    return EXIT_OK
+
+
+EXPERT_TITLES = {
+    "classifier": "классификатор",
+    "anomaly": "детектор аномалий",
+    "meta_only": "только мета-слой",
+}
+
+
 def _print_run_summary(s) -> None:
-    _out(f"Прогон {s.run_id} ({s.source}), детектор {s.detector_version}, {s.seconds:.1f} с")
+    model = s.model or f"детектор {s.detector_version}"
+    _out(f"Прогон {s.run_id} ({s.source}), модель: {model}, {s.seconds:.1f} с")
     _out(f"  потоков {s.n_flows}, алертов {s.n_alerts}, инцидентов {s.n_incidents}")
+    if s.alerts_by_expert:
+        by = ", ".join(f"{EXPERT_TITLES.get(k, k)} {v}" for k, v in s.alerts_by_expert.items())
+        _out(f"  алертов по экспертам: {by} (алерт двух экспертов учтён у обоих)")
+    _out(f"  ответных потоков среди алертов: {s.n_reversed} (направление: {s.direction_mode})")
+    if s.n_anomaly_incidents:
+        _out(
+            f"  инцидентов класса anomaly (класс атаки неизвестен): {s.n_anomaly_incidents} — "
+            "для них предложен только ручной разбор"
+        )
     if s.n_incidents == 0:
         _out("  Атак не найдено — инцидентов нет.")
     else:
@@ -250,7 +343,7 @@ def cmd_soc_run(args, cfg) -> int:
         summary = run_chain(
             source,
             cfg,
-            detector_dir=Path(args.detector),
+            model_dir=_model_dir(args),
             data_dir=Path(args.data_dir),
             limit=args.limit,
         )
@@ -259,6 +352,59 @@ def cmd_soc_run(args, cfg) -> int:
         return EXIT_ERROR
     _print_run_summary(summary)
     return EXIT_OK
+
+
+def cmd_soc_review(args, cfg) -> int:
+    """Разбор инцидентов с адресов жертв/фона и сравнение прогонов (фича 004, US4)."""
+    from mlsiem.soc import store
+    from mlsiem.soc.review import review_sources, summary_line, write_review
+
+    if not cfg.db.exists():
+        log.error("Хранилище %s пустое: прогонов нет", cfg.db)
+        return EXIT_ERROR
+    conn = store.connect(cfg.db)
+    try:
+        store.init_db(conn)
+        try:
+            report = review_sources(conn, cfg, args.run, args.after, data_dir=Path(args.data_dir))
+        except store.NotFound as exc:
+            log.error("Ошибка: %s", exc.message)
+            return EXIT_ERROR
+    finally:
+        conn.close()
+    md, js = write_review(report, Path(args.reports_dir))
+    _out(f"Разбор прогона {args.run}" + (f" (после: {args.after})" if args.after else ""))
+    _out(f"  {summary_line(report)}")
+    kept = report.get("attackers_kept")
+    if kept and kept["lost"]:
+        lost = ", ".join(f"{x['ip']}/{x['class']}" for x in kept["lost"])
+        _out(f"  ПОТЕРЯНЫ АТАКУЮЩИЕ: {lost}")
+    _out(f"Отчёт: {md}; данные: {js}")
+    return EXIT_OK
+
+
+DEFAULT_ENSEMBLE = Path("models/ensemble")
+DEFAULT_DETECTOR = Path("models/detector")
+
+
+def _model_dir(args, *, quiet: bool = False) -> Path:
+    """Каталог модели прогона (фича 004, contracts/cli.md).
+
+    `--model` и `--detector` — синонимы (второй остался от 002/003). Без них — ансамбль из
+    models/ensemble, если он обучен, иначе детектор 002 и предупреждение об этом.
+    """
+    chosen = getattr(args, "model", None) or getattr(args, "detector", None)
+    if chosen:
+        return Path(chosen)
+    if (DEFAULT_ENSEMBLE / "ensemble_card.json").exists():
+        return DEFAULT_ENSEMBLE
+    if not quiet:
+        log.warning(
+            "Ансамбль не обучен (нет %s/ensemble_card.json) — прогон одиночным детектором %s",
+            DEFAULT_ENSEMBLE.as_posix(),
+            DEFAULT_DETECTOR.as_posix(),
+        )
+    return DEFAULT_DETECTOR
 
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
@@ -282,13 +428,14 @@ def cmd_soc_serve(args, cfg) -> int:
     port = args.port or cfg.api.port
     try:
         # create_app сам приводит базу к схеме фичи 003 (миграция 002 → 2 одной транзакцией)
-        app = create_app(cfg, detector_dir=Path(args.detector))
+        app = create_app(cfg, detector_dir=_model_dir(args, quiet=True))
     except SchemaTooNew as exc:
         log.error("Нельзя открыть %s: %s", cfg.db, exc.message)
         return EXIT_ERROR
     if app.state.migrated:
         log.info(
-            "Схема базы %s обновлена до версии %d (аудит перенесён целиком)",
+            "Схема базы %s обновлена до версии %d (прогоны, решения и аудит сохранены целиком; "
+            "старые прогоны открываются с пометкой «до ансамбля»)",
             cfg.db,
             SCHEMA_VERSION,
         )
@@ -318,9 +465,15 @@ def cmd_soc_status(args, cfg) -> int:
     _out(f"Прогонов в {cfg.db}: {len(runs)}")
     for r in runs:
         st = r["incidents_by_status"]
+        m = r["model"]
+        model = (
+            f"ансамбль {m['version']} ({m['selected']})"
+            if m["kind"] == "ensemble"
+            else f"детектор {m['version']}"
+        )
         _out(
             f"  {r['run_id']}  {r['source']:<24} {r['started_at']}  "
-            f"детектор {r['detector_version']}  "
+            f"{model}  "
             f"инцидентов {r['n_incidents']} (new {st['new']}, in_progress {st['in_progress']}, "
             f"closed {st['closed']})"
         )
@@ -342,10 +495,25 @@ def _load_detect_config(args):
     return load_detect_config(args.config)
 
 
+def _load_ensemble_config(args):
+    from mlsiem.detect.config import load_ensemble_config
+
+    return load_ensemble_config(args.config)
+
+
 def _load_soc_config(args):
     from mlsiem.soc.config import load_soc_config
 
     return load_soc_config(args.config)
+
+
+def _model_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--model",
+        help="каталог модели: ансамбль (ensemble_card.json) или детектор 002 (model_card.json); "
+        "по умолчанию models/ensemble, если он обучен, иначе models/detector",
+    )
+    p.add_argument("--detector", help="синоним --model (совместимость с 002/003)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -411,6 +579,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="где MLflow держит mlflow.db и mlruns/ (по умолчанию корень)",
     )
     p.set_defaults(func=cmd_detect_train)
+    p = sub.add_parser(
+        "ensemble", help="эксперимент 004: эксперт аномалий, мета-слой и выбор (FR-010)"
+    )
+    p.add_argument("--config", default="configs/ensemble.yaml", help="конфиг эксперимента 004")
+    p.add_argument("--reports-dir", default="reports", help="куда писать отчёт эксперимента")
+    p.add_argument(
+        "--mlflow-dir",
+        default=".",
+        help="где MLflow держит mlflow.db и mlruns/ (по умолчанию корень)",
+    )
+    p.set_defaults(func=cmd_detect_ensemble, load_config=_load_ensemble_config)
 
     soc = groups.add_parser("soc", help="инциденты, реагирование и API аналитика (фича 002)")
     soc.add_argument("--config", default="configs/soc.yaml", help="конфиг SOC")
@@ -422,14 +601,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pcap", help="новый неразмеченный PCAP вместо разбиения")
     p.add_argument("--limit", type=int, help="взять только первые N потоков по времени")
     p.add_argument("--data-dir", default="data", help="где лежат потоки и разбиения 001")
-    p.add_argument("--detector", default="models/detector", help="каталог артефакта детектора")
+    _model_args(p)
     p.set_defaults(func=cmd_soc_run)
     p = sub.add_parser("serve", help="поднять консоль и API аналитика на 127.0.0.1")
     p.add_argument("--port", type=int, help="порт (по умолчанию из конфига)")
-    p.add_argument("--detector", default="models/detector", help="каталог артефакта детектора")
+    _model_args(p)
     p.set_defaults(func=cmd_soc_serve)
     p = sub.add_parser("status", help="какие прогоны лежат в хранилище")
     p.set_defaults(func=cmd_soc_status)
+    p = sub.add_parser(
+        "review-sources",
+        help="разбор инцидентов с адресов жертв и фона, сравнение прогонов «до/после» (004)",
+    )
+    p.add_argument("--run", required=True, help="прогон «до» (его инциденты разбираются)")
+    p.add_argument("--after", help="прогон «после» — для сравнения и проверки атакующих")
+    p.add_argument("--reports-dir", default="reports", help="куда писать отчёт разбора")
+    p.add_argument("--data-dir", default="data", help="где лежат потоки и разбиения 001")
+    p.set_defaults(func=cmd_soc_review)
     return parser
 
 

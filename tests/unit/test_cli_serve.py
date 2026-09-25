@@ -33,7 +33,8 @@ def test_serve_migrates_002_database(tmp_path, monkeypatch, capfd):
     code, started = _serve(tmp_path, monkeypatch)
     assert code == 0 and started["host"] == "127.0.0.1"
     text = capfd.readouterr().err
-    assert "обновлена до версии 2" in text
+    # фича 004: база 002 проходит цепочку 0 → 2 → 3 за один запуск
+    assert f"обновлена до версии {store.SCHEMA_VERSION}" in text
     assert "http://127.0.0.1:8000/" in text and "http://127.0.0.1:8000/api/v1" in text
 
 
@@ -45,7 +46,7 @@ def test_serve_new_database_no_migration_message(tmp_path, monkeypatch, capfd):
 def test_serve_refuses_newer_database(tmp_path, monkeypatch, capfd):
     conn = store.connect(tmp_path / "soc.db")
     store.init_db(conn)
-    conn.execute("PRAGMA user_version = 3")
+    conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 1}")
     conn.close()
     code, started = _serve(tmp_path, monkeypatch)
     assert code == 1 and started == {}

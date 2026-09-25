@@ -1,4 +1,33 @@
-{#- Вероятности детектора по всем классам для одного потока и порог (FR-010, research R10). -#}
+{#- Детали алерта: блок «Эксперты» (фича 004, FR-019) и вероятности по классам (FR-010, research R10).
+    Эксперты — из SQLite (объяснение и ответы экспертов пишутся в алерт при прогоне), поэтому
+    блок есть, даже если файл вердиктов прогона потерян. Строки таблицы экспертов — без <tbody>:
+    это отдельная маленькая таблица, а <tbody> здесь — только у таблицы вероятностей. -#}
+{% set e = p.experts %}
+<section class="experts-box">
+  <h3>Эксперты</h3>
+  {% if not e.available %}
+  <p class="muted">{{ e.note }}</p>
+  {% else %}
+  {% if e.explanation %}<p class="explanation"><strong>{{ e.explanation }}</strong></p>{% endif %}
+  <table class="experts-table">
+    <thead><tr><th scope="col">Эксперт</th><th scope="col">Скор</th><th scope="col">Порог эксперта</th><th scope="col">Сработал</th></tr></thead>
+    {% for r in e.rows %}
+    <tr data-expert="{{ r.name }}"{% if r.fired %} class="fired"{% endif %}>
+      <td>{{ r.name | label('expert') }}</td>
+      <td class="num">{{ r.score }}</td>
+      <td class="num">{{ r.threshold }}</td>
+      <td>{% if r.fired %}<span class="badge over">да</span>{% else %}нет{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="final-verdict">Итоговый вердикт ({{ e.model }}): класс <strong>{{ e.final_class | cls }}</strong>,
+    скор <strong>{{ '%.4f' | format(e.final_score) }}</strong>{% if e.final_threshold is not none %} при пороге {{ '%.4f' | format(e.final_threshold) }}{% endif %}.</p>
+  {% if e.reversed %}
+  <p class="direction"><span class="badge reversed">ответный</span>
+    Ответный поток: атакующая сторона — <code>{{ e.attacker_ip }}</code>, исходное направление <code>{{ e.original }}</code>.</p>
+  {% endif %}
+  {% endif %}
+</section>
 {% if not p.available %}
 <p class="muted">{{ p.reason }}</p>
 {% else %}

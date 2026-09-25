@@ -122,3 +122,32 @@ stages:
     outs:
       - models/detector
       - reports/detector_experiment.md
+
+  # Фича 004: эксперимент «эксперты + мета-слой» (детектор аномалий, мета-кандидаты,
+  # скрытые классы, выбор по FR-010). Классификатор 002 — вход, он здесь не переобучается.
+  # MLflow (эксперимент ensemble) — вне DVC, как у train_detector; отчёт — не в кеше DVC.
+  train_ensemble:
+    cmd: uv run mlsiem detect ensemble
+    deps:
+      - data/flows/unsw
+      - data/splits/unsw_time.parquet
+      - models/detector
+      - configs/detect.yaml
+      - src/mlsiem/detect
+    params:
+      - configs/ensemble.yaml:
+          - split
+          - seed
+          - classifier
+          - anomaly
+          - meta
+          - hidden_classes
+          - selection
+          - audit
+          - unreliable_below
+          - output
+    outs:
+      - models/experts/anomaly
+      - models/ensemble
+      - reports/ensemble_experiment.md:
+          cache: false

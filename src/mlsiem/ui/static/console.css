@@ -303,3 +303,19 @@ blockquote.comment { margin: 4px 0 0; padding: 2px 10px; border-left: 3px solid 
 .run-summary { margin-bottom: 8px; }
 .narrow { max-width: 520px; }
 .back { margin: 0; }
+
+/* ---------------------------------------------------------------- фича 004: эксперты */
+
+.experts-box { margin-bottom: 10px; }
+.experts-box h3 { margin: 4px 0; font-size: 1rem; }
+.experts-box .explanation { margin: 4px 0 8px; overflow-wrap: anywhere; }
+.experts-table td, .experts-table th { padding: 2px 6px; }
+.experts-table tr.fired td:first-child { font-weight: 600; }
+.badge.reversed { background: var(--warn-bg); color: var(--warn-text); }
+.experts-short { font-family: var(--mono); text-align: center; }
+.legend { font-size: 0.8rem; }
+.experts-summary { margin-top: 8px; }
+.experts-summary .counts li, .model-box .counts li { display: flex; justify-content: space-between; padding: 3px 0; }
+.experts-summary .combinations { margin: 4px 0; padding-left: 18px; }
+.model-box { margin: 12px 0; }
+.model-box h2 code { font-size: 0.9rem; }

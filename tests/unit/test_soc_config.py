@@ -29,6 +29,8 @@ def test_repo_config_loads():
     assert cfg.protected_ips == ()
     assert [r.id for r in cfg.rules] == [
         "protected",
+        # фича 004: класс «аномалия» — всегда ручной разбор, сразу после защищённых
+        "unknown_class",
         "intrusion_single_target",
         "intrusion_many_targets",
         "noisy_attack",
@@ -153,3 +155,42 @@ def test_sections_optional_for_002_configs(raw):
 def test_empty_networks_allowed(raw):
     raw["networks"] = []
     assert parse_soc_config(raw).networks == ()
+
+
+# ---------------------------------------------------------------- фича 004
+
+
+def test_direction_modes(raw):
+    assert parse_soc_config(raw).direction == "auto"
+    raw["grouping"]["direction"] = "as_is"
+    assert parse_soc_config(raw).direction == "as_is"
+    raw["grouping"]["direction"] = "reverse"
+    with pytest.raises(ConfigError, match="grouping.direction"):
+        parse_soc_config(raw)
+
+
+def test_direction_optional_for_old_configs(raw):
+    del raw["grouping"]["direction"]
+    assert parse_soc_config(raw).direction == "auto"
+
+
+def test_anomaly_needs_severity(raw):
+    from mlsiem.soc.config import check_model_classes
+
+    cfg = parse_soc_config(raw)
+    check_model_classes(cfg, ["benign", "dos", "anomaly"])
+    del raw["severity"]["base"]["anomaly"]
+    cfg = parse_soc_config(raw)
+    check_model_classes(cfg, ["benign", "dos"])  # у детектора 002 класса anomaly нет — ок
+    with pytest.raises(ValueError, match="anomaly"):
+        check_model_classes(cfg, ["benign", "dos", "anomaly"])
+
+
+def test_soc_run_refuses_without_anomaly_level(raw, tmp_path, synthetic_split, tiny_ensemble):
+    from mlsiem.soc.run import run_chain
+
+    del raw["severity"]["base"]["anomaly"]
+    cfg = parse_soc_config({**raw, "db": str(tmp_path / "soc.db"), "runs_dir": str(tmp_path / "r")})
+    with pytest.raises(ValueError, match="severity.base"):
+        run_chain("split:unsw_time/test", cfg, model_dir=tiny_ensemble, data_dir=synthetic_split)
+    assert not (tmp_path / "r").exists() or not any((tmp_path / "r").iterdir())

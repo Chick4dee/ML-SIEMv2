@@ -110,3 +110,61 @@ def prior_baseline(y_train: np.ndarray, y_eval: np.ndarray, classes: list[str]) 
     """
     per_class = per_class_pr_auc(y_eval, prior_proba(y_train, classes, len(y_eval)), classes)
     return {"macro_pr_auc": macro_pr_auc(per_class), "per_class": per_class}
+
+
+# ---------------------------------------------------------------- фича 004: эксперты и ансамбль
+
+# Итоговый класс «сработал только детектор аномалий — что за атака, неизвестно» (FR-017).
+# Одна константа на всех: её пишет мета-слой (detect/meta.py), а плейбуки (soc/playbooks.py)
+# по ней включают страховку «только ручной разбор». Строка в двух местах разошлась бы молча
+ANOMALY_CLASS = "anomaly"
+
+
+def binary_pr_auc(y_attack: np.ndarray, score: np.ndarray) -> float | None:
+    """PR-AUC задачи «атака / не атака» (FR-006).
+
+    У детектора аномалий нет классов, поэтому с классификатором и ансамблем его сравнивают
+    именно так. Если в части нет атак или нет нормы, метрика не определена — `None`, а не 0:
+    «нечего искать» и «искали плохо» — разные вещи.
+    """
+    y = np.asarray(y_attack, dtype=bool)
+    if not y.any() or y.all():
+        return None
+    return float(average_precision_score(y, np.asarray(score, dtype=np.float64)))
+
+
+def catch_rate(y: np.ndarray, alerts: np.ndarray, cls: str) -> float | None:
+    """«Поимка» класса: доля его потоков, ставших алертами (FR-011, эксперимент «скрытый класс»).
+
+    Для неизвестного модели класса PR-AUC по нему не посчитать — у модели нет такого выхода.
+    Зато можно спросить главное: сколько таких потоков вообще подняли тревогу. `None` —
+    примеров класса в части нет.
+    """
+    mask = np.asarray(y) == cls
+    if not mask.any():
+        return None
+    return float(np.asarray(alerts, dtype=bool)[mask].mean())
+
+
+def fpr_on_benign(y: np.ndarray, alerts: np.ndarray) -> float | None:
+    """Доля нормальных потоков, ставших алертами (SC-002, порог эксперта аномалий)."""
+    mask = np.asarray(y) == BENIGN
+    if not mask.any():
+        return None
+    return float(np.asarray(alerts, dtype=bool)[mask].mean())
+
+
+def unreliable_classes(y: np.ndarray, classes: list[str], below: int = 50) -> list[str]:
+    """Классы, у которых в части меньше `below` примеров (но хотя бы один).
+
+    PR-AUC по 14 `worms` скачет от одного потока — такие цифры помечаются в отчёте
+    «ненадёжен», чтобы по ним не делали выводов. Классы без примеров сюда не входят:
+    для них PR-AUC и так не считается (`None`).
+    """
+    y = np.asarray(y)
+    out = []
+    for cls in classes:
+        n = int((y == cls).sum())
+        if 0 < n < below:
+            out.append(cls)
+    return sorted(out)

@@ -80,3 +80,31 @@ def tiny_detector(synthetic_split, tmp_path_factory) -> Path:
     )
     run_experiment(cfg, data_dir=synthetic_split, reports_dir=root / "reports", mlflow_dir=root)
     return root / "detector"
+
+
+# ---------------------------------------------------------------- фича 004
+
+
+@pytest.fixture(scope="session")
+def tiny_ensemble(synthetic_split, tiny_detector, tmp_path_factory) -> Path:
+    """Ансамбль, собранный настоящим `run_ensemble_experiment` на синтетике, — для тестов
+    цепочки, API и консоли (US3).
+
+    Выбор подменён: `force_variant="stack_logreg"` — только ключевой аргумент функции, не
+    ключ конфига и не флаг CLI. Нужен для тестов цепочки, а не для выводов: у цепочки всегда
+    должны быть два эксперта и обучаемый мета-слой, что бы ни выбрал эксперимент на синтетике.
+    """
+    from fixtures.small_configs import small_ensemble_raw
+    from mlsiem.detect.config import parse_ensemble_config
+    from mlsiem.detect.ensemble import run_ensemble_experiment
+
+    root = tmp_path_factory.mktemp("tiny_ensemble")
+    cfg = parse_ensemble_config(small_ensemble_raw(tiny_detector, root))
+    run_ensemble_experiment(
+        cfg,
+        data_dir=synthetic_split,
+        reports_dir=root / "reports",
+        mlflow_dir=root,
+        force_variant="stack_logreg",
+    )
+    return root / "ensemble"

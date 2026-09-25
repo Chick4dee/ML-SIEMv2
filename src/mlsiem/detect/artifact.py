@@ -79,6 +79,34 @@ def major(version: str) -> str:
     return str(version).split(".", 1)[0]
 
 
+def check_schema_and_features(
+    expected_schema: str,
+    features: list[str],
+    schema_version: str | None,
+    columns: list[str],
+    who: str = "детектор",
+) -> None:
+    """Общая проверка входа модели (FR-007, фича 004 FR-014): та же мажорная версия схемы
+    и на месте все признаки. `who` — чьё имя назвать в сообщении («детектор», «эксперт
+    аномалий»): при отказе ансамбля аналитик должен понять, какой именно эксперт недоволен."""
+    if schema_version is None:
+        raise DetectorInputError(
+            f"у входа не указана версия схемы признаков — ожидалась схема {expected_schema}"
+        )
+    if major(schema_version) != major(expected_schema):
+        raise DetectorInputError(
+            f"несовместимая версия схемы признаков: ожидалась схема "
+            f"{major(expected_schema)}.x ({who} обучен на {expected_schema}), "
+            f"получена {schema_version}"
+        )
+    missing = [f for f in features if f not in set(columns)]
+    if missing:
+        raise DetectorInputError(
+            f"во входе нет признаков, на которых обучен {who}: {', '.join(missing[:10])}"
+            + (f" и ещё {len(missing) - 10}" if len(missing) > 10 else "")
+        )
+
+
 @dataclass
 class Detector:
     """Загруженный детектор: конвейер + карточка."""
@@ -108,22 +136,9 @@ class Detector:
 
     def check_input(self, schema_version: str | None, columns: list[str]) -> None:
         """FR-007: мажорная версия схемы входа совпадает с детектором и есть все признаки."""
-        if schema_version is None:
-            raise DetectorInputError(
-                f"у входа не указана версия схемы признаков — ожидалась схема {self.schema_version}"
-            )
-        if major(schema_version) != major(self.schema_version):
-            raise DetectorInputError(
-                f"несовместимая версия схемы признаков: ожидалась схема "
-                f"{major(self.schema_version)}.x (детектор обучен на {self.schema_version}), "
-                f"получена {schema_version}"
-            )
-        missing = [f for f in self.features if f not in set(columns)]
-        if missing:
-            raise DetectorInputError(
-                f"во входе нет признаков, на которых обучен детектор: {', '.join(missing[:10])}"
-                + (f" и ещё {len(missing) - 10}" if len(missing) > 10 else "")
-            )
+        check_schema_and_features(
+            self.schema_version, self.features, schema_version, columns, "детектор"
+        )
 
     def check_parquet(self, path: Path) -> None:
         """То же для parquet-файла: версия схемы — из метаданных `mlsiem.schema_version`."""

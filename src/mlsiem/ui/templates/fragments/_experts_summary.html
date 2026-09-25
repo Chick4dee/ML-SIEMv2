@@ -1,0 +1,24 @@
+{#- «Кто поднял алерты» (фича 004, contracts/ui.md): по экспертам и по сочетаниям.
+    Алерт, поднятый двумя экспертами, учтён у обоих — поэтому суммы по экспертам могут быть
+    больше числа алертов; сочетания же не пересекаются. -#}
+{% set s = experts_summary %}
+<section class="experts-summary" id="experts-summary">
+  <h2>Кто поднял алерты</h2>
+  {% if not s.available %}
+  <p class="muted">{{ s.note }}.</p>
+  {% else %}
+  <ul class="counts">
+    {% for name, n in s.by_expert.items() %}
+    <li data-expert="{{ name }}">{{ name | label('expert') }} <strong>{{ n }}</strong></li>
+    {% endfor %}
+  </ul>
+  <ul class="combinations">
+    {% for c in s.combinations %}
+    <li data-combination="{{ c.experts | join('+') or 'meta' }}">
+      {% if c.experts %}{% for n in c.experts %}{{ n | label('expert') }}{% if not loop.last %} + {% endif %}{% endfor %}{% else %}только мета-слой{% endif %}:
+      <strong>{{ c.n_alerts }}</strong></li>
+    {% endfor %}
+  </ul>
+  <p class="muted">Алерт, поднятый двумя экспертами, учтён у обоих.</p>
+  {% endif %}
+</section>

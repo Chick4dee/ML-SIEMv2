@@ -2,6 +2,7 @@
 
 import json
 import re
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -136,3 +137,109 @@ def test_bump_in_grouping():
 def test_empty():
     with_inc, inc = group(alerts([]).head(0))
     assert with_inc.height == 0 and inc.height == 0
+
+
+# ---------------------------------------------------------------- фича 004: атакующая сторона
+
+
+def _response_case(direction):
+    """Ответный поток 149.171.126.17:80 → 175.45.176.0 и прямой с того же атакующего."""
+    from mlsiem.soc.verdicts import alerts_from_verdicts
+
+    flows = pl.DataFrame(
+        [
+            {
+                "flow_uid": "r/1",
+                "capture_id": "c",
+                "src_ip": "149.171.126.17",
+                "src_port": 80,
+                "dst_ip": "175.45.176.0",
+                "dst_port": 40000,
+                "protocol": 6,
+                "bidirectional_first_seen_ms": 0,
+                "bidirectional_last_seen_ms": 10,
+                "src2dst_syn_packets": 0,
+                "dst2src_syn_packets": 1,
+            },
+            {
+                "flow_uid": "r/2",
+                "capture_id": "c",
+                "src_ip": "175.45.176.0",
+                "src_port": 40001,
+                "dst_ip": "149.171.126.18",
+                "dst_port": 80,
+                "protocol": 6,
+                "bidirectional_first_seen_ms": MIN,
+                "bidirectional_last_seen_ms": MIN + 10,
+                "src2dst_syn_packets": 1,
+                "dst2src_syn_packets": 1,
+            },
+        ]
+    )
+    verdicts = pl.DataFrame(
+        {
+            "flow_uid": ["r/1", "r/2"],
+            "predicted_class": ["exploits", "exploits"],
+            "attack_score": [0.99, 0.98],
+            "is_alert": [True, True],
+            "e_classifier_score": [0.99, 0.98],
+            "e_classifier_fired": [True, True],
+            "explanation": ["сработал классификатор", "сработал классификатор"],
+        }
+    )
+    a = alerts_from_verdicts(verdicts, flows, direction=direction)
+    return a, *group(a)
+
+
+def test_reversed_alert_grouped_by_attacker():
+    from mlsiem.soc.config import load_soc_config
+    from mlsiem.soc.playbooks import propose_action
+
+    a, with_inc, inc = _response_case("auto")
+    row = a.filter(pl.col("flow_uid") == "r/1").row(0, named=True)
+    # исходные src/dst не тронуты, а атакующий — вторая сторона
+    assert (row["src_ip"], row["dst_ip"]) == ("149.171.126.17", "175.45.176.0")
+    assert (row["attacker_ip"], row["victim_ip"], row["reversed"]) == (
+        "175.45.176.0",
+        "149.171.126.17",
+        1,
+    )
+    assert "поток ответный" in row["explanation"] and "175.45.176.0" in row["explanation"]
+    # оба алерта — один инцидент с ключом 175.45.176.0
+    assert inc.height == 1
+    i = inc.row(0, named=True)
+    assert i["src_ip"] == "175.45.176.0"
+    assert json.loads(i["targets"]) == ["149.171.126.17", "149.171.126.18"]
+    rules = load_soc_config(Path(__file__).parents[2] / "configs" / "soc.yaml").rules
+    action = propose_action({**i, "severity": "high"}, rules, ())
+    assert action["action_type"] == "block_source_ip" and action["target"] == "175.45.176.0"
+
+
+def test_as_is_is_002_behaviour():
+    a, with_inc, inc = _response_case("as_is")
+    assert (a["reversed"] == 0).all()
+    assert sorted(inc["src_ip"]) == ["149.171.126.17", "175.45.176.0"]
+    # байт в байт то же, что группировка 002 (без полей атакующей стороны)
+    old = a.drop("attacker_ip", "victim_ip", "reversed", "direction_rule")
+    _, inc_002 = group(old)
+    assert inc.equals(inc_002)
+
+
+def test_as_is_equals_auto_on_synthetic(synthetic_flows, tiny_detector):
+    """На синтетике (инициатор — src) auto и as_is дают одни и те же инциденты."""
+    from mlsiem.detect.artifact import load_detector
+    from mlsiem.soc.verdicts import alerts_from_verdicts, compute_verdicts
+
+    flows = pl.concat(list(synthetic_flows.values()))
+    det = load_detector(tiny_detector)
+    out = {}
+    for mode in ("auto", "as_is"):
+        v = compute_verdicts(det, flows, direction=mode)
+        out[mode] = group_alerts(
+            alerts_from_verdicts(v, flows, direction=mode),
+            window_ms=W,
+            run_id="run-1",
+            severity_base={c: "medium" for c in det.classes},
+            bump_at=100,
+        )[1]
+    assert out["auto"].equals(out["as_is"])

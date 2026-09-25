@@ -7,8 +7,8 @@
 
 <section class="summary">
   <dl class="facts">
-    <div><dt>Источник (ключ группировки)</dt><dd class="ip">{{ inc.src_ip }}</dd></div>
-    <div><dt>Класс атаки</dt><dd>{{ inc.attack_class }}</dd></div>
+    <div><dt>Атакующая сторона (ключ группировки)</dt><dd class="ip">{{ inc.src_ip }}</dd></div>
+    <div><dt>Класс атаки</dt><dd>{{ inc.attack_class | cls }}</dd></div>
     <div><dt>Цели ({{ inc.targets | length }})</dt><dd class="ip">{{ long_list(inc.targets, 5) }}</dd></div>
     <div><dt>Интервал (время трафика)</dt><dd class="time">{{ inc.first_seen_ms | utc_ms }} — {{ inc.last_seen_ms | utc_ms }}</dd></div>
     <div><dt>Алертов</dt><dd class="num">{{ inc.n_alerts }}</dd></div>
@@ -16,6 +16,7 @@
     <div class="wide"><dt>Серьёзность</dt><dd>{{ sev(inc.severity) }} <span class="reason">{{ inc.severity_reason }}</span></dd></div>
     <div><dt>Прогон</dt><dd><code>{{ inc.run_id }}</code> · {{ run.source }}</dd></div>
   </dl>
+  {% include "fragments/_experts_summary.html" %}
 </section>
 
 {% if inc.flags %}

@@ -11,7 +11,7 @@
   <ul class="counts">
     {% for key, n, url in rows %}
     <li><a href="{{ url }}" data-counter="{{ kind }}:{{ key }}" data-count="{{ n }}">
-      {% if kind == 'class' %}{{ key }}{% else %}{{ key | label(kind) }}{% endif %}
+      {% if kind == 'class' %}{{ key | cls }}{% else %}{{ key | label(kind) }}{% endif %}
       <strong>{{ n }}</strong></a></li>
     {% endfor %}
   </ul>
@@ -29,6 +29,22 @@
     {{ tile('открытых без ответственного', d.counters.unassigned, 'unassigned') }}
     {{ tile('с подозрительным источником', d.counters.flagged, 'flagged') }}
   </div>
+  <section class="group model-box" id="run-model">
+    <h2>Модель прогона: <code>{{ d.model }}</code></h2>
+    {% if d.alerts_by_expert %}
+    <ul class="counts">
+      {% for name, n in d.alerts_by_expert.items() %}
+      <li data-counter="expert:{{ name }}" data-count="{{ n }}">{{ name | label('expert') }} <strong>{{ n }}</strong></li>
+      {% endfor %}
+      {% if d.n_reversed is not none %}
+      <li data-counter="reversed" data-count="{{ d.n_reversed }}">ответных потоков <strong>{{ d.n_reversed }}</strong></li>
+      {% endif %}
+    </ul>
+    <p class="muted">Алертов по экспертам: алерт, поднятый двумя экспертами, учтён у обоих.</p>
+    {% else %}
+    <p class="muted">Прогон сделан до появления ансамбля — вклада экспертов нет.</p>
+    {% endif %}
+  </section>
   <div class="groups">
     {{ group('По статусу', d.by_status, 'status') }}
     {{ group('По серьёзности', d.by_severity, 'severity') }}

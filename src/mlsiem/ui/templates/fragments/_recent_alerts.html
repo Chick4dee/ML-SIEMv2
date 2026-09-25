@@ -13,7 +13,7 @@
         {% for a in recent %}
         <tr>
           <td class="time">{{ a.first_seen_ms | utc_ms }}</td>
-          <td>{{ a.predicted_class }}</td>
+          <td>{{ a.predicted_class | cls }}</td>
           <td class="num">{{ '%.3f' | format(a.attack_score) }}</td>
           <td class="ip">{{ a.src_ip }}:{{ a.src_port }}</td>
           <td class="ip">{{ a.dst_ip }}:{{ a.dst_port }}</td>

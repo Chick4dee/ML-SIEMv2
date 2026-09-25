@@ -82,3 +82,54 @@ def test_alert_context(detector, flows):
     assert row["src_ip"] == src["src_ip"]
     assert row["first_seen_ms"] == src["bidirectional_first_seen_ms"]
     assert row["last_seen_ms"] == src["bidirectional_last_seen_ms"]
+
+
+# ---------------------------------------------------------------- фича 004: эксперты
+
+
+@pytest.fixture(scope="module")
+def ensemble(tiny_ensemble):
+    from mlsiem.detect.ensemble import load_model
+
+    return load_model(tiny_ensemble)
+
+
+def test_ensemble_alerts_have_experts(ensemble, flows):
+    import json
+
+    v = compute_verdicts(ensemble, flows)
+    a = alerts_from_verdicts(v, flows, experts_meta=ensemble.experts_meta)
+    assert a.height == int(v["is_alert"].sum()) > 0
+    for row in a.iter_rows(named=True):
+        experts = json.loads(row["experts"])
+        assert set(experts) == {"classifier", "anomaly"}
+        for name, e in experts.items():
+            assert set(e) == {"score", "threshold", "fired"}
+            assert e["threshold"] == ensemble.experts_meta[name]["threshold"]
+        fired = sorted(n for n, e in experts.items() if e["fired"])
+        assert row["fired_experts"] == ",".join(fired)  # "" — только мета-слой
+        assert row["explanation"]
+    # на синтетике обе ситуации встречаются: сработал хоть один эксперт и сработали оба
+    assert (a["fired_experts"] != "").any()
+
+
+def test_verdict_columns(ensemble, detector, flows):
+    v = compute_verdicts(ensemble, flows)
+    base = ["flow_uid", "predicted_class", "attack_score", "is_alert"]
+    probs = [f"p_{c}" for c in ensemble.classes]
+    experts = ["e_classifier_score", "e_classifier_fired", "e_anomaly_score", "e_anomaly_fired"]
+    assert v.columns[: len(base) + len(probs)] == base + probs
+    assert set(experts) <= set(v.columns)
+    assert {"reversed", "true_label"} <= set(v.columns)
+    # у детектора 002 эксперт один — classifier
+    d = compute_verdicts(detector, flows)
+    assert "e_classifier_score" in d.columns and "e_anomaly_score" not in d.columns
+    a = alerts_from_verdicts(d, flows)
+    assert set(a["fired_experts"].unique()) == {"classifier"}
+
+
+def test_synthetic_flows_are_direct(detector, flows):
+    # Синтетика после правки фикстуры (R15): инициатор всегда src — ответных потоков нет,
+    # поэтому группировка на ней та же, что в 002
+    v = compute_verdicts(detector, flows)
+    assert not v["reversed"].any()

@@ -258,10 +258,16 @@ def list_page(conn: sqlite3.Connection, cfg: SocConfig, view: IncidentListView) 
         "total": total,
         "items": items,
         "pages": pages,
-        "classes": list(summary["by_class"]) if summary else [],
+        # Класс «аномалия» в фильтре есть всегда (фича 004): его выдаёт только ансамбль
+        "classes": filter_classes(list(summary["by_class"]) if summary else []),
         "run_total": summary["total"] if summary else 0,
         "etag": list_etag(conn, view),
     }
+
+
+def filter_classes(present: list[str]) -> list[str]:
+    """Варианты фильтра «Класс атаки»: классы прогона и всегда `anomaly` (в конце)."""
+    return [c for c in present if c != "anomaly"] + ["anomaly"]
 
 
 def list_etag(conn: sqlite3.Connection, view: IncidentListView) -> str:
@@ -400,6 +406,8 @@ def incident_card(
         "timeline": timeline(inc, audit, first[0] if first else None, last[0] if last else None),
         "alerts": alerts_page_data(conn, cfg, incident_id, alerts_page),
         "related_flags": [f for f in inc["flags"] if f.kind == "target_elsewhere"],
+        # фича 004: кто поднял алерты инцидента
+        "experts_summary": store.experts_summary(conn, incident_id),
     }
 
 
@@ -419,14 +427,86 @@ def alerts_page_data(conn: sqlite3.Connection, cfg: SocConfig, incident_id: str,
     }
 
 
-def alert_probs(cfg: SocConfig, run: dict, flow_uid: str, detector_dir: Path) -> dict:
-    """Вероятности детектора по классам для одного потока и порог (FR-010, research R10).
+def model_title(run: dict) -> str:
+    """Модель прогона словами: «ансамбль <версия> (<вариант>)» или «детектор <версия>»."""
+    m = run.get("model") or store.run_model(run)
+    if m["kind"] == "ensemble":
+        return f"ансамбль {m['version']} ({m['selected']})"
+    return f"детектор {m['version']}"
+
+
+def _expert_value(kind: str, x: float | None) -> str:
+    """Скор эксперта так, как его понимает аналитик: у аномалий — перцентиль нормы."""
+    if x is None:
+        return "—"
+    if kind == "anomaly":
+        return f"{x * 100:.1f}-й перцентиль нормы"
+    return f"{x:.4f}"
+
+
+def experts_block(run: dict, alert: dict | None) -> dict:
+    """Блок «Эксперты» деталей алерта (фича 004, contracts/ui.md, FR-019).
+
+    Всё берётся из SQLite (ответы экспертов и объяснение пишутся в алерт при прогоне) —
+    поэтому блок есть, даже если файл вердиктов прогона потерян. У прогонов до ансамбля
+    ответов экспертов нет: вместо таблицы — честная пометка с версией детектора.
+    """
+    if alert is None:
+        return {"available": False, "note": "поток не стал алертом — ответов экспертов нет"}
+    if alert.get("experts") is None:
+        return {
+            "available": False,
+            "note": (
+                f"Прогон сделан до появления ансамбля: один детектор {run['detector_version']}"
+            ),
+        }
+    meta = (run.get("summary") or {}).get("experts_meta") or {}
+    rows = []
+    order = sorted(alert["experts"], key=lambda n: (n != "classifier", n))
+    for name in order:
+        e = alert["experts"][name]
+        kind = (meta.get(name) or {}).get("kind", name)
+        rows.append(
+            {
+                "name": name,
+                "score": _expert_value(kind, e.get("score")),
+                "threshold": _expert_value(kind, e.get("threshold")),
+                "fired": bool(e.get("fired")),
+            }
+        )
+    summary = run.get("summary") or {}
+    return {
+        "available": True,
+        "explanation": alert.get("explanation"),
+        "rows": rows,
+        "model": model_title(run),
+        "final_score": alert["attack_score"],
+        "final_threshold": summary.get("threshold"),
+        "final_class": alert["predicted_class"],
+        "reversed": bool(alert.get("reversed")),
+        "attacker_ip": alert.get("attacker_ip"),
+        "original": (
+            f"{alert['src_ip']}:{alert['src_port']} → {alert['dst_ip']}:{alert['dst_port']}"
+        ),
+    }
+
+
+def alert_probs(
+    cfg: SocConfig, run: dict, flow_uid: str, detector_dir: Path, alert: dict | None = None
+) -> dict:
+    """Вероятности по классам для одного потока и порог (FR-010, research R10) + блок экспертов.
 
     Вероятности не хранятся в SQLite — их сотни тысяч; они в `verdicts.parquet` прогона.
     Читается одна строка через ленивый скан с фильтром — это десятки миллисекунд.
     Любая беда с файлом — не ошибка страницы, а честное «вероятности недоступны».
+    Блок экспертов (фича 004) — из SQLite, от файла не зависит.
     """
-    out: dict[str, Any] = {"available": False, "flow_uid": flow_uid, "run_id": run["run_id"]}
+    out: dict[str, Any] = {
+        "available": False,
+        "flow_uid": flow_uid,
+        "run_id": run["run_id"],
+        "experts": experts_block(run, alert),
+    }
     path = Path(cfg.runs_dir) / run["run_id"] / "verdicts.parquet"
     if not path.exists():
         out["reason"] = "вероятности недоступны: файл вердиктов прогона не найден"
@@ -483,6 +563,8 @@ def run_threshold(run: dict, detector_dir: Path) -> tuple[float | None, str]:
 def dashboard(conn: sqlite3.Connection, cfg: SocConfig, run_id: str) -> dict:
     """Сводка прогона + для каждого счётчика готовая ссылка в список (FR-022, SC-004)."""
     s = store.dashboard_summary(conn, run_id)
+    run = store.get_run(conn, run_id)
+    summary = run.get("summary") or {}
     run_flags = soc_flags.run_flags(conn, run_id, cfg.networks)
     base = IncidentListView(run=run_id)
     counters = {
@@ -500,8 +582,14 @@ def dashboard(conn: sqlite3.Connection, cfg: SocConfig, run_id: str) -> dict:
         "by_status": [(k, n, base.url(status=(k,))) for k, n in s["by_status"].items()],
         "by_severity": [(k, n, base.url(severity=(k,))) for k, n in s["by_severity"].items()],
         "by_class": [(k, n, base.url(attack_class=k)) for k, n in s["by_class"].items()],
-        "run": store.get_run(conn, run_id),
+        "run": run,
         "etag": '"' + store.list_state(conn, run_id) + '"',
+        # фича 004: модель прогона и вклад экспертов
+        "model": model_title(run),
+        "alerts_by_expert": summary.get("alerts_by_expert") or {},
+        "n_reversed": summary.get("n_reversed"),
+        "direction_mode": summary.get("direction_mode"),
+        "before_ensemble": "model" not in summary,
     }
 
 

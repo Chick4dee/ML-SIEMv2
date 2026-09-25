@@ -52,8 +52,10 @@ def git_commit() -> str | None:
         return None
 
 
-def _setup_mlflow(mlflow_dir: Path):
-    """Подключает MLflow: база `<dir>/mlflow.db`, файлы runs — `<dir>/mlruns/`."""
+def _setup_mlflow(mlflow_dir: Path, experiment: str = MLFLOW_EXPERIMENT):
+    """Подключает MLflow: база `<dir>/mlflow.db`, файлы runs — `<dir>/mlruns/`.
+
+    `experiment` — имя эксперимента MLflow: `detector` (002) или `ensemble` (004)."""
     os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
     for name in ("mlflow", "alembic"):
         logging.getLogger(name).setLevel(logging.WARNING)
@@ -62,11 +64,9 @@ def _setup_mlflow(mlflow_dir: Path):
     mlflow_dir = Path(mlflow_dir).resolve()
     mlflow_dir.mkdir(parents=True, exist_ok=True)
     mlflow.set_tracking_uri("sqlite:///" + (mlflow_dir / "mlflow.db").as_posix())
-    if mlflow.get_experiment_by_name(MLFLOW_EXPERIMENT) is None:
-        mlflow.create_experiment(
-            MLFLOW_EXPERIMENT, artifact_location=(mlflow_dir / "mlruns").as_uri()
-        )
-    mlflow.set_experiment(MLFLOW_EXPERIMENT)
+    if mlflow.get_experiment_by_name(experiment) is None:
+        mlflow.create_experiment(experiment, artifact_location=(mlflow_dir / "mlruns").as_uri())
+    mlflow.set_experiment(experiment)
     return mlflow
 
 

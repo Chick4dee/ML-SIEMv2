@@ -18,6 +18,10 @@ latin-1, поэтому имя пишется латиницей (наприме
 `sort`, `dir`), поля `assignee` и `flags`, метод `POST /incidents/{id}/assign`
 (contracts/api-v1-additions.md). CORS-заголовков по-прежнему нет — это часть защиты: запрос
 с `X-Analyst` с чужого сайта браузер без разрешающего preflight не отправит.
+
+Фича 004 — тоже только добавления (FR-018): у алерта атакующая сторона и ответы экспертов,
+у карточки инцидента сводка «кто поднял алерты», у прогона — модель прогона. Для прогонов
+до ансамбля новые поля — null (FR-020); берутся они из SQLite, а не из parquet-файлов.
 """
 
 from __future__ import annotations
@@ -100,6 +104,20 @@ class IncidentItem(BaseModel):
     flags: list[SourceFlag] = []
 
 
+class ExpertsCombination(BaseModel):
+    experts: list[str]
+    n_alerts: int
+
+
+class ExpertsSummary(BaseModel):
+    """Кто поднял алерты инцидента (фича 004): по экспертам и сочетаниям."""
+
+    available: bool
+    by_expert: dict[str, int] = {}
+    combinations: list[ExpertsCombination] = []
+    note: str
+
+
 class IncidentCard(IncidentItem):
     severity_reason: str
     max_score: float
@@ -108,6 +126,8 @@ class IncidentCard(IncidentItem):
     updated_at: str
     action: ActionFull | None
     history: list[HistoryEntry]
+    # фича 004
+    experts_summary: ExpertsSummary | None = None
 
 
 class IncidentPage(BaseModel):
@@ -130,6 +150,13 @@ class Alert(BaseModel):
     last_seen_ms: int
     predicted_class: str
     attack_score: float
+    # фича 004 — только добавления; у прогонов до ансамбля experts/fired_experts/explanation = null
+    attacker_ip: str | None = None
+    victim_ip: str | None = None
+    reversed: bool = False
+    experts: dict[str, dict[str, Any]] | None = None
+    fired_experts: list[str] | None = None
+    explanation: str | None = None
 
 
 class AlertPage(BaseModel):
@@ -167,6 +194,8 @@ class Run(BaseModel):
     summary: dict[str, Any]
     warnings: list[str]
     incidents_by_status: dict[str, int]
+    # фича 004: модель прогона (у старых — детектор с версией из detector_version)
+    model: dict[str, Any] | None = None
 
 
 class RunList(BaseModel):
@@ -336,16 +365,21 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
         )
         return {"total": total, "items": with_flags(conn, items)}
 
+    def card(conn, inc: dict) -> dict:
+        item = with_flags(conn, [inc])[0]
+        item["experts_summary"] = store.experts_summary(conn, item["incident_id"])
+        return item
+
     @app.get(PREFIX + "/incidents/{incident_id}", response_model=IncidentCard)
     def get_incident(incident_id: str, conn=Depends(db)):
-        return with_flags(conn, [store.get_incident(conn, incident_id)])[0]
+        return card(conn, store.get_incident(conn, incident_id))
 
     @app.post(PREFIX + "/incidents/{incident_id}/assign", response_model=IncidentCard)
     def assign(incident_id: str, body: AssignChange, who: str = Depends(analyst), conn=Depends(db)):
-        card = store.assign(
+        inc = store.assign(
             conn, incident_id, who, body.assignee, body.expected_version, body.comment
         )
-        return with_flags(conn, [card])[0]
+        return card(conn, inc)
 
     @app.get(PREFIX + "/incidents/{incident_id}/alerts", response_model=AlertPage)
     def incident_alerts(
@@ -361,7 +395,7 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
     def change_status(
         incident_id: str, body: StatusChange, who: str = Depends(analyst), conn=Depends(db)
     ):
-        card = store.change_status(
+        inc = store.change_status(
             conn,
             incident_id,
             who,
@@ -370,7 +404,7 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
             body.comment,
             body.expected_version,
         )
-        return with_flags(conn, [card])[0]
+        return card(conn, inc)
 
     # ---------------- действия
 
@@ -411,12 +445,18 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
     @app.get(PREFIX + "/health", response_model=Health)
     def health():
         version = None
-        card = Path(detector_dir) / "model_card.json"
-        if card.exists():
-            try:
-                version = json.loads(card.read_text(encoding="utf-8")).get("detector_version")
-            except (json.JSONDecodeError, OSError):
-                version = None
+        # Каталог модели — детектор 002 или ансамбль (фича 004): версия из той карточки, что есть
+        for name, key in (
+            ("ensemble_card.json", "ensemble_version"),
+            ("model_card.json", "detector_version"),
+        ):
+            card = Path(detector_dir) / name
+            if card.exists():
+                try:
+                    version = json.loads(card.read_text(encoding="utf-8")).get(key)
+                except (json.JSONDecodeError, OSError):
+                    version = None
+                break
         return {"status": "ok", "detector_version": version, "db": Path(cfg.db).as_posix()}
 
     # Консоль аналитика (фича 003) — в том же процессе и на том же порту (FR-031). Импорт

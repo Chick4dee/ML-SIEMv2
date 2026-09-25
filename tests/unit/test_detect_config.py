@@ -76,3 +76,60 @@ def test_split_must_be_unsw(raw):
     raw["split"] = "ctu13_scenario"
     with pytest.raises(ConfigError, match="split"):
         parse_detect_config(raw)
+
+
+# ---------------------------------------------------------------- фича 004: EnsembleConfig
+
+
+class TestEnsembleConfig:
+    @pytest.fixture
+    def eraw(self) -> dict:
+        return yaml.safe_load((REPO / "configs" / "ensemble.yaml").read_text(encoding="utf-8"))
+
+    def test_repo_config_loads(self):
+        from mlsiem.detect.config import load_ensemble_config
+
+        cfg = load_ensemble_config(REPO / "configs" / "ensemble.yaml")
+        assert cfg.split == "unsw_time" and cfg.seed == 42
+        assert cfg.classifier == Path("models/detector")
+        assert list(cfg.anomaly.candidates) == ["iforest", "autoencoder"]
+        assert cfg.anomaly.anomaly_fpr == pytest.approx(0.005)
+        assert cfg.anomaly.calibration_share == pytest.approx(0.10)
+        assert cfg.anomaly.train_sample == 300_000
+        assert cfg.meta.candidates == ("any_fired", "mean_score", "stack_logreg")
+        assert cfg.meta.folds == 5 and cfg.meta.gap_ms == 60000
+        assert cfg.hidden_classes == ("exploits", "dos")
+        assert cfg.selection.min_gain == pytest.approx(0.01)
+        assert cfg.selection.min_unknown_gain == pytest.approx(0.10)
+        assert cfg.output_anomaly == Path("models/experts/anomaly")
+        assert cfg.output_ensemble == Path("models/ensemble")
+
+    @pytest.mark.parametrize(
+        "path, value, match",
+        [
+            ("anomaly.candidates", {"iforest": {}, "ocsvm": {}}, "ocsvm"),
+            ("anomaly.candidates", {"autoencoder": {}}, "бейзлайн"),
+            ("meta.candidates", ["any_fired", "xgb_meta"], "xgb_meta"),
+            ("anomaly.anomaly_fpr", 0.0, "anomaly_fpr"),
+            ("anomaly.anomaly_fpr", 0.7, "anomaly_fpr"),
+            ("anomaly.calibration_share", 0.5, "calibration_share"),
+            ("anomaly.calibration_share", 0, "calibration_share"),
+            ("meta.folds", 1, "folds"),
+            ("meta.gap_ms", -1, "gap_ms"),
+            ("selection.min_gain", -0.01, "min_gain"),
+            ("selection.min_unknown_gain", -0.1, "min_unknown_gain"),
+            ("hidden_classes", [], "hidden_classes"),
+            ("split", "ctu13_scenario", "UNSW"),
+            ("anomaly.exclude_features", ["src_ip"], "exclude_features"),
+        ],
+    )
+    def test_errors_named(self, eraw, path, value, match):
+        from mlsiem.detect.config import parse_ensemble_config
+
+        node = eraw
+        *parents, last = path.split(".")
+        for p in parents:
+            node = node[p]
+        node[last] = value
+        with pytest.raises(ConfigError, match=match):
+            parse_ensemble_config(eraw)

@@ -14,7 +14,7 @@
     <div><dt>Потоков</dt><dd class="num">{{ run.n_flows }}</dd></div>
     <div><dt>Алертов</dt><dd class="num">{{ run.n_alerts }}</dd></div>
     <div><dt>Инцидентов</dt><dd class="num">{{ run.n_incidents }}</dd></div>
-    <div><dt>Детектор</dt><dd><code>{{ run.detector_version }}</code></dd></div>
+    <div><dt>Модель прогона</dt><dd><code>{{ d.model }}</code>{% if d.before_ensemble %} <span class="muted">(прогон до ансамбля)</span>{% endif %}</dd></div>
     <div><dt>Прогон сделан</dt><dd class="time">{{ run.started_at | utc_iso }}</dd></div>
     {% if run.summary.get('alerts_true_share') is not none %}
     <div><dt>Алертов на настоящих атаках (по разметке)</dt><dd>{{ run.summary.alerts_true_share | percent }}</dd></div>

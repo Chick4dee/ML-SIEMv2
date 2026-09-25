@@ -57,7 +57,22 @@ LABELS: dict[str, dict[str, str]] = {
     "field": {"status": "статус", "resolution": "резолюция", "assignee": "ответственный"},
     "clock": {"traffic": "время трафика", "decision": "время решения"},
     "flag": {"network": "сеть", "target_elsewhere": "цель в других инцидентах"},
+    # фича 004: эксперты ансамбля (contracts/ui.md)
+    "expert": {
+        "classifier": "классификатор атак",
+        "anomaly": "детектор аномалий",
+        "meta": "мета-слой",
+        "meta_only": "только мета-слой",
+    },
 }
+
+# Класс «аномалия» — единственный, который переводим: это не класс датасета, а честное
+# «что это за атака, неизвестно» (сработал только детектор аномалий, FR-017)
+ANOMALY_CLASS_TITLE = "аномалия (класс неизвестен)"
+# Короткие метки экспертов для таблицы алертов — с расшифровкой в легенде
+EXPERT_SHORT = {"classifier": "К", "anomaly": "А"}
+META_SHORT = "М"
+REVERSED_BADGE = "ответный"
 
 EMPTY = "—"
 
@@ -109,8 +124,32 @@ def percent(x: float | None, digits: int = 1) -> str:
     return EMPTY if x is None else f"{x * 100:.{digits}f}%"
 
 
+def attack_class(value: object) -> str:
+    """Класс атаки для показа: классы датасета — как есть, `anomaly` — по-русски."""
+    if value == "anomaly":
+        return ANOMALY_CLASS_TITLE
+    return EMPTY if value in (None, "") else str(value)
+
+
+def experts_short(fired: list[str] | None) -> str:
+    """Сработавшие эксперты коротко: «К», «А», «К+А»; «М» — алерт поднял только мета-слой;
+    пусто — прогон до ансамбля (ответов экспертов нет)."""
+    if fired is None:
+        return EMPTY
+    if not fired:
+        return META_SHORT
+    return "+".join(EXPERT_SHORT.get(n, n) for n in sorted(fired, key=_expert_order))
+
+
+def _expert_order(name: str) -> tuple[int, str]:
+    # Классификатор первым — так «К+А» читается одинаково во всех таблицах
+    return (0 if name == "classifier" else 1, name)
+
+
 def register(env: Environment) -> None:
     env.filters.update(
+        cls=attack_class,
+        experts_short=experts_short,
         label=label,
         utc_ms=utc_ms,
         utc_iso=utc_iso,

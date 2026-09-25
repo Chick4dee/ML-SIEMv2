@@ -99,3 +99,39 @@ def test_prior_equals_class_shares():
     assert p["per_class"]["dos"] == pytest.approx(0.3)
     assert p["per_class"]["exploits"] == pytest.approx(0.2)
     assert p["macro_pr_auc"] == pytest.approx((0.5 + 0.3 + 0.2) / 3)
+
+
+# ---------------------------------------------------------------- фича 004
+
+
+def test_binary_pr_auc_matches_sklearn():
+    rng = np.random.default_rng(1)
+    y = rng.random(200) < 0.2
+    s = rng.random(200)
+    assert M.binary_pr_auc(y, s) == pytest.approx(average_precision_score(y, s))
+
+
+def test_binary_pr_auc_undefined():
+    s = np.linspace(0, 1, 10)
+    assert M.binary_pr_auc(np.zeros(10, bool), s) is None
+    assert M.binary_pr_auc(np.ones(10, bool), s) is None
+
+
+def test_catch_rate():
+    y = np.array(["dos", "dos", "dos", "benign", "exploits"])
+    alerts = np.array([True, False, True, True, False])
+    assert M.catch_rate(y, alerts, "dos") == pytest.approx(2 / 3)
+    assert M.catch_rate(y, alerts, "exploits") == 0.0
+    assert M.catch_rate(y, alerts, "worms") is None
+
+
+def test_fpr_on_benign():
+    y = np.array(["benign"] * 4 + ["dos"])
+    alerts = np.array([True, False, False, False, True])
+    assert M.fpr_on_benign(y, alerts) == pytest.approx(0.25)
+    assert M.fpr_on_benign(np.array(["dos"]), np.array([True])) is None
+
+
+def test_unreliable_classes():
+    y = np.array(["benign"] * 100 + ["worms"] * 3 + ["dos"] * 60)
+    assert M.unreliable_classes(y, ["benign", "worms", "dos", "backdoor"], below=50) == ["worms"]

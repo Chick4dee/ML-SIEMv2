@@ -26,6 +26,9 @@ ACTION_TYPES = ("block_source_ip", "isolate_host", "observe", "manual_review")
 # background, остальные — чтобы подписать адрес в карточке
 NETWORK_ROLES = ("victims", "background", "infrastructure", "other")
 REFRESH_RANGE = (3, 300)
+# Как определять атакующую сторону потока (фича 004, research R8): auto — правилом по
+# TCP-флагам и портам самого потока, as_is — как в 002 (атакующий = src_ip)
+DIRECTION_MODES = ("auto", "as_is")
 # Сети по умолчанию — если в конфиге (например, от фичи 002) нет раздела networks. Это
 # наблюдения прогона 002: оттуда пришли 17 из 66 «атак», на деле — ответные направления
 DEFAULT_NETWORKS: tuple[dict[str, Any], ...] = (
@@ -86,6 +89,8 @@ class SocConfig:
     raw: dict[str, Any]
     networks: tuple[NetworkConfig, ...] = ()
     ui: UiConfig = dc_field(default_factory=UiConfig)
+    # фича 004: режим определения атакующей стороны
+    direction: str = "auto"
 
 
 def _level(value: Any, key: str) -> str:
@@ -197,6 +202,15 @@ def parse_soc_config(raw: Any) -> SocConfig:
             f"ключ grouping.window_ms: окно не может быть отрицательным ({window_ms})"
         )
 
+    # grouping.direction необязателен: конфиги 002/003 его не знают — тогда auto
+    grouping = raw.get("grouping") or {}
+    direction = grouping.get("direction", "auto") if isinstance(grouping, dict) else "auto"
+    if direction not in DIRECTION_MODES:
+        raise ConfigError(
+            f"ключ grouping.direction: допустимы {list(DIRECTION_MODES)} (auto — атакующая "
+            f"сторона по данным потока, as_is — как в 002), а записано {direction!r}"
+        )
+
     protected = _get(raw, "protected_ips", list)
     if not all(isinstance(ip, str) for ip in protected):
         raise ConfigError("ключ protected_ips: нужен список IP-адресов строками")
@@ -230,7 +244,27 @@ def parse_soc_config(raw: Any) -> SocConfig:
         raw=raw,
         networks=tuple(_parse_network(n, i) for i, n in enumerate(networks_raw)),
         ui=_parse_ui(raw.get("ui")),
+        direction=direction,
     )
+
+
+def check_model_classes(cfg: SocConfig, classes: list[str]) -> None:
+    """Каждому классу, который может выдать модель прогона, нужен уровень серьёзности.
+
+    `classes` — классы итогового вердикта модели: классы классификатора и, если в модели
+    есть детектор аномалий, класс `anomaly` (фича 004, FR-017). Проверка — до обработки
+    данных: падать на середине прогона из-за забытой строки конфига обидно.
+    """
+    missing = [c for c in classes if c != "benign" and c not in cfg.severity_base]
+    if missing:
+        raise ValueError(
+            f"в configs/soc.yaml (severity.base) нет уровня для классов модели: {missing}"
+            + (
+                " — класс anomaly выдаёт детектор аномалий ансамбля (фича 004)"
+                if "anomaly" in missing
+                else ""
+            )
+        )
 
 
 def load_soc_config(path: str | Path = DEFAULT_SOC_CONFIG) -> SocConfig:

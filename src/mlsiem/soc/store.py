@@ -44,8 +44,8 @@ AUDIT_EVENTS = (
 )
 SYSTEM_ACTOR = "system"
 # Версия схемы в PRAGMA user_version. База фичи 002 имеет 0 (единица зарезервирована как
-# «схема 002», чтобы явно отличать её от пустого файла); фича 003 вводит версию 2
-SCHEMA_VERSION = 2
+# «схема 002», чтобы явно отличать её от пустого файла); фича 003 вводит версию 2, фича 004 — 3
+SCHEMA_VERSION = 3
 
 
 # ---------------------------------------------------------------- ошибки
@@ -124,6 +124,12 @@ INDEXES_V2 = (
 )
 INDEXES_V2_DDL = "".join(f"{stmt};\n" for stmt in INDEXES_V2)
 
+# Индекс фичи 004: сводка «кто поднял алерты» по инциденту — один GROUP BY по нему
+INDEXES_V3 = (
+    "CREATE INDEX IF NOT EXISTS ix_alerts_incident_experts ON alerts(incident_id, fired_experts)",
+)
+INDEXES_V3_DDL = "".join(f"{stmt};\n" for stmt in INDEXES_V3)
+
 DDL = f"""
 CREATE TABLE IF NOT EXISTS runs (
     run_id           TEXT PRIMARY KEY,
@@ -176,6 +182,14 @@ CREATE TABLE IF NOT EXISTS alerts (
     last_seen_ms     INTEGER NOT NULL,
     predicted_class  TEXT NOT NULL,
     attack_score     REAL NOT NULL,
+    -- фича 004: атакующая сторона (research R8) и ответы экспертов (R10).
+    -- experts/fired_experts/explanation = NULL — прогон сделан до ансамбля
+    attacker_ip      TEXT,
+    victim_ip        TEXT,
+    reversed         INTEGER NOT NULL DEFAULT 0,
+    fired_experts    TEXT,
+    experts          TEXT,
+    explanation      TEXT,
     UNIQUE (run_id, flow_uid)
 );
 
@@ -213,7 +227,7 @@ CREATE INDEX IF NOT EXISTS ix_incidents_status ON incidents(status);
 CREATE INDEX IF NOT EXISTS ix_incidents_class ON incidents(attack_class);
 CREATE INDEX IF NOT EXISTS ix_alerts_incident ON alerts(incident_id, first_seen_ms);
 CREATE INDEX IF NOT EXISTS ix_history_incident ON incident_history(incident_id);
-{INDEXES_V2_DDL}"""
+{INDEXES_V2_DDL}{INDEXES_V3_DDL}"""
 
 # Миграция схемы 002 (0) → 2. Шаги выполняются по одному внутри ОДНОЙ транзакции (см.
 # `migrate`): executescript здесь нельзя — он сам делает COMMIT перед началом.
@@ -236,7 +250,25 @@ MIGRATION_V2: tuple[str, ...] = (
     "DROP TABLE audit_log_v1",
     *AUDIT_GUARDS,
     *INDEXES_V2,
-    f"PRAGMA user_version = {SCHEMA_VERSION}",
+    "PRAGMA user_version = 2",
+)
+
+# Миграция схемы 2 (фича 003) → 3 (фича 004), тоже одной транзакцией (data-model «Миграция
+# 2 → 3»). Здесь только добавления: новых событий аудита нет, поэтому аудит, в отличие от
+# миграции 0 → 2, не пересоздаётся и не трогается вовсе. Старым алертам атакующая сторона
+# заполняется как в 002 (атакующий = src_ip) — это не правка аудита: на alerts запрещающих
+# триггеров нет, а прогоны до 004 и группировались ровно так. Ответы экспертов у них остаются
+# NULL — это и есть пометка «прогон сделан до появления ансамбля» (FR-020).
+MIGRATION_V3: tuple[str, ...] = (
+    "ALTER TABLE alerts ADD COLUMN attacker_ip TEXT",
+    "ALTER TABLE alerts ADD COLUMN victim_ip TEXT",
+    "ALTER TABLE alerts ADD COLUMN reversed INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE alerts ADD COLUMN fired_experts TEXT",
+    "ALTER TABLE alerts ADD COLUMN experts TEXT",
+    "ALTER TABLE alerts ADD COLUMN explanation TEXT",
+    "UPDATE alerts SET attacker_ip = src_ip, victim_ip = dst_ip",
+    *INDEXES_V3,
+    "PRAGMA user_version = 3",
 )
 
 
@@ -265,10 +297,11 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> bool:
     """Готовит базу к работе и возвращает True, если пришлось мигрировать схему.
 
-    Четыре случая по `PRAGMA user_version` и наличию таблиц:
-    - пустой файл → сразу схема 2;
-    - схема 002 (версия 0 или 1, таблицы есть) → миграция `MIGRATION_V2`;
-    - схема 2 → только IF NOT EXISTS (ничего не меняется);
+    Случаи по `PRAGMA user_version` и наличию таблиц:
+    - пустой файл → сразу схема 3;
+    - схема 002 (версия 0 или 1, таблицы есть) → `MIGRATION_V2`, затем `MIGRATION_V3`;
+    - схема 2 (фича 003) → `MIGRATION_V3`;
+    - схема 3 → только IF NOT EXISTS (ничего не меняется);
     - версия больше известной → `SchemaTooNew`: база от более нового кода, трогать нельзя.
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -290,9 +323,18 @@ def init_db(conn: sqlite3.Connection) -> bool:
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """Схема 002 → 2 одной транзакцией (data-model «Миграция 0 → 2»)."""
+    """Доводит базу до текущей схемы; каждый шаг цепочки — своей транзакцией.
+
+    0 → 2 (фича 003) и 2 → 3 (фича 004). Сбой посреди шага откатывает только этот шаг:
+    база остаётся целиком в предыдущей схеме, и повторный запуск продолжит с неё.
+    """
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < 2:
+        with transaction(conn):
+            for step in MIGRATION_V2:
+                conn.execute(step)
     with transaction(conn):
-        for step in MIGRATION_V2:
+        for step in MIGRATION_V3:
             conn.execute(step)
 
 
@@ -381,6 +423,13 @@ ALERT_COLUMNS = (
     "last_seen_ms",
     "predicted_class",
     "attack_score",
+    # фича 004
+    "attacker_ip",
+    "victim_ip",
+    "reversed",
+    "fired_experts",
+    "experts",
+    "explanation",
 )
 INCIDENT_COLUMNS = (
     "incident_id",
@@ -419,6 +468,19 @@ def _insert_many(conn: sqlite3.Connection, table: str, columns: tuple[str, ...],
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
         (tuple(r[c] for c in columns) for r in rows),
     )
+
+
+def _alert_defaults(a: dict) -> dict:
+    """Поля фичи 004 для алертов, пришедших без них (вызовы 002/003 и тесты тех фич):
+    атакующий — src_ip, как группировал 002; ответов экспертов нет."""
+    return {
+        "attacker_ip": a.get("src_ip"),
+        "victim_ip": a.get("dst_ip"),
+        "reversed": 0,
+        "fired_experts": None,
+        "experts": None,
+        "explanation": None,
+    }
 
 
 def write_run(
@@ -477,7 +539,15 @@ def write_run(
             conn,
             "alerts",
             ALERT_COLUMNS,
-            ({**a, "run_id": run_id, "alert_id": f"{run_id}/{a['flow_uid']}"} for a in alerts),
+            (
+                {
+                    **_alert_defaults(a),
+                    **a,
+                    "run_id": run_id,
+                    "alert_id": f"{run_id}/{a['flow_uid']}",
+                }
+                for a in alerts
+            ),
         )
         for a in actions or []:
             _insert_many(
@@ -518,6 +588,39 @@ def _run_row(r: sqlite3.Row) -> dict:
     d = dict(r)
     d["summary"] = json.loads(d["summary"])
     d["warnings"] = json.loads(d["warnings"])
+    d["model"] = run_model(d)
+    return d
+
+
+def run_model(run: dict) -> dict:
+    """Модель прогона (фича 004): из сводки, а у прогонов до 004 — «детектор <версия>»."""
+    model = (run.get("summary") or {}).get("model")
+    if model:
+        return {
+            "kind": model.get("kind", "detector"),
+            "version": model.get("version", run["detector_version"]),
+            "selected": model.get("selected"),
+            "experts": model.get("experts"),
+        }
+    return {
+        "kind": "detector",
+        "version": run["detector_version"],
+        "selected": None,
+        "experts": None,
+    }
+
+
+def alert_row(r: sqlite3.Row | dict) -> dict:
+    """Строка алерта для API и консоли: JSON экспертов → словарь, список сработавших
+    экспертов → список (`[]` — алерт поднял мета-слой), `reversed` → bool. У алертов прогона
+    до ансамбля `experts` и `fired_experts` остаются None («прогон до ансамбля»)."""
+    d = dict(r)
+    if "experts" in d:
+        d["experts"] = json.loads(d["experts"]) if d["experts"] else None
+    if "fired_experts" in d and d["fired_experts"] is not None:
+        d["fired_experts"] = [x for x in d["fired_experts"].split(",") if x]
+    if "reversed" in d:
+        d["reversed"] = bool(d["reversed"])
     return d
 
 
@@ -1022,7 +1125,63 @@ def list_alerts(
         "LIMIT ? OFFSET ?",
         (incident_id, limit, offset),
     ).fetchall()
-    return total, [dict(r) for r in rows]
+    return total, [alert_row(r) for r in rows]
+
+
+def get_alert(conn: sqlite3.Connection, run_id: str, flow_uid: str) -> dict | None:
+    """Один алерт прогона по потоку (или None, если поток не стал алертом)."""
+    row = conn.execute(
+        "SELECT * FROM alerts WHERE run_id = ? AND flow_uid = ?", (run_id, flow_uid)
+    ).fetchone()
+    return alert_row(row) if row else None
+
+
+EXPERTS_NOTE = "алерт, поднятый несколькими экспертами, учитывается у каждого в by_expert"
+
+
+def experts_summary(conn: sqlite3.Connection, incident_id: str) -> dict:
+    """Кто поднял алерты инцидента (фича 004, data-model «Сводка по экспертам»).
+
+    Один GROUP BY по `fired_experts` (индекс ix_alerts_incident_experts): сочетания
+    «классификатор», «классификатор + аномалии», «только мета-слой» и т. д. У алертов прогона
+    до ансамбля `fired_experts` = NULL — тогда `available: false` и пометка с версией детектора.
+    """
+    row = conn.execute(
+        "SELECT r.detector_version FROM incidents i JOIN runs r ON r.run_id = i.run_id "
+        "WHERE i.incident_id = ?",
+        (incident_id,),
+    ).fetchone()
+    if row is None:
+        raise NotFound(f"инцидент {incident_id} не найден")
+    groups = conn.execute(
+        "SELECT fired_experts, COUNT(*) AS n FROM alerts WHERE incident_id = ? "
+        "GROUP BY fired_experts ORDER BY fired_experts",
+        (incident_id,),
+    ).fetchall()
+    known = [(g["fired_experts"], g["n"]) for g in groups if g["fired_experts"] is not None]
+    if not known:
+        return {
+            "available": False,
+            "by_expert": {},
+            "combinations": [],
+            "note": (
+                f"прогон сделан до появления ансамбля (один детектор {row['detector_version']})"
+            ),
+        }
+    by_expert: dict[str, int] = {}
+    combinations = []
+    for fired, n in known:
+        names = sorted(x for x in fired.split(",") if x)
+        for name in names:
+            by_expert[name] = by_expert.get(name, 0) + n
+        combinations.append({"experts": names, "n_alerts": n})
+    combinations.sort(key=lambda c: (-c["n_alerts"], c["experts"]))
+    return {
+        "available": True,
+        "by_expert": dict(sorted(by_expert.items())),
+        "combinations": combinations,
+        "note": EXPERTS_NOTE,
+    }
 
 
 def list_audit(
@@ -1165,7 +1324,7 @@ def dashboard_summary(conn: sqlite3.Connection, run_id: str) -> dict:
 def recent_alerts(conn: sqlite3.Connection, run_id: str, n: int) -> list[dict]:
     """Последние по времени потока алерты прогона (индекс ix_alerts_run_time)."""
     return [
-        dict(r)
+        alert_row(r)
         for r in conn.execute(
             "SELECT * FROM alerts WHERE run_id = ? ORDER BY first_seen_ms DESC, flow_uid LIMIT ?",
             (run_id, n),

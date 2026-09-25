@@ -88,6 +88,27 @@ def _day_rows(rng: np.random.Generator, day: str, n_benign: int) -> list[dict]:
     return rows
 
 
+def _initiator_syn(data: dict) -> None:
+    """Фича 004 (research R15): у TCP-потоков инициатор — `src`, и это видно по флагам.
+
+    Раньше флаги были случайными «счётчиками», и правило атакующей стороны (soc/direction.py)
+    сочло бы часть синтетики ответными потоками — хотя по замыслу генератора клиент всегда
+    `src` (эфемерный порт ≥ 1024 → сервис). Поэтому у TCP в src2dst ставим хотя бы один SYN,
+    а в bidirectional — не меньше суммы по направлениям, как у настоящего nfstream.
+    Генератор случайных чисел здесь не трогаем: остальные колонки остаются прежними.
+    """
+    tcp = np.asarray(data["protocol"]) == 6
+    s2d = np.asarray(data["src2dst_syn_packets"])
+    d2s = np.asarray(data["dst2src_syn_packets"])
+    s2d = np.where(tcp, np.maximum(s2d, 1), s2d)
+    data["src2dst_syn_packets"] = s2d
+    data["bidirectional_syn_packets"] = np.where(
+        tcp,
+        np.maximum(np.asarray(data["bidirectional_syn_packets"]), s2d + d2s),
+        data["bidirectional_syn_packets"],
+    )
+
+
 def make_synthetic_flows(*, n_benign_per_day: int = 2500, seed: int = 0) -> dict[str, pl.DataFrame]:
     """capture_id → таблица потоков со всеми колонками схемы (в порядке и с типами схемы)."""
     rng = np.random.default_rng(seed)
@@ -120,6 +141,7 @@ def make_synthetic_flows(*, n_benign_per_day: int = 2500, seed: int = 0) -> dict
             col = x[:, j]
             data[name] = col if DTYPES[name] == pl.Float64 else np.round(col).astype(np.int64)
         data["protocol"] = rng.choice([6, 17], size=n)
+        _initiator_syn(data)
         columns = []
         for c in SCHEMA.columns:
             if c.name in data:

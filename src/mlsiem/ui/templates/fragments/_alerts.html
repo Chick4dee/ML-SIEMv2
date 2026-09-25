@@ -1,6 +1,7 @@
 {#- Алерты инцидента постранично (FR-010). Вероятности по классам подгружаются только при
     раскрытии алерта: они лежат в verdicts.parquet, и читать их для всех строк незачем.
-    Без JS внутри <details> — обычная ссылка на тот же фрагмент. -#}
+    Без JS внутри <details> — обычная ссылка на тот же фрагмент.
+    Фича 004: значок «ответный» у перевёрнутых потоков и колонка «Эксперты» (К, А, К+А, М). -#}
 {% from "macros.html" import pager with context %}
 <div id="alerts" class="alerts-box">
   <p class="count">Всего алертов: <strong>{{ alerts.total }}</strong>{% if alerts.pages > 1 %}, страница {{ alerts.page }} из {{ alerts.pages }}{% endif %}</p>
@@ -15,23 +16,25 @@
           <th scope="col">Протокол</th>
           <th scope="col">Класс</th>
           <th scope="col">Уверенность</th>
+          <th scope="col">Эксперты</th>
           <th scope="col">Вероятности детектора</th>
         </tr>
       </thead>
       <tbody>
         {% for a in alerts['items'] %}
         {% set probs_url = "/fragments/alerts/" ~ (a.run_id | urlencode) ~ "/" ~ (a.flow_uid | urlencode | replace('%2F', '/')) ~ "/probs" %}
-        <tr data-flow="{{ a.flow_uid }}">
+        <tr data-flow="{{ a.flow_uid }}"{% if a.reversed %} data-reversed="1"{% endif %}>
           <td class="time">{{ a.first_seen_ms | utc_ms }}</td>
-          <td class="ip">{{ a.src_ip }}:{{ a.src_port }}</td>
+          <td class="ip">{{ a.src_ip }}:{{ a.src_port }}{% if a.reversed %} <span class="badge reversed" title="поток ответный: атакующая сторона — {{ a.attacker_ip }}">ответный</span>{% endif %}</td>
           <td class="ip">{{ a.dst_ip }}:{{ a.dst_port }}</td>
           <td>{{ a.protocol | proto }}</td>
-          <td>{{ a.predicted_class }}</td>
+          <td>{{ a.predicted_class }}{% if a.predicted_class == 'anomaly' %} <span class="muted">({{ a.predicted_class | cls }})</span>{% endif %}</td>
           <td class="num">{{ '%.3f' | format(a.attack_score) }}</td>
+          <td class="experts-short">{{ a.fired_experts | experts_short }}</td>
           <td>
             <details hx-get="{{ probs_url }}" hx-trigger="toggle once" hx-target="find .probs" hx-swap="innerHTML">
               <summary>показать</summary>
-              <div class="probs"><a href="{{ probs_url }}">вероятности по классам</a></div>
+              <div class="probs"><a href="{{ probs_url }}">эксперты и вероятности по классам</a></div>
             </details>
           </td>
         </tr>
@@ -39,6 +42,9 @@
       </tbody>
     </table>
   </div>
+  <p class="legend muted">Эксперты: К — классификатор атак, А — детектор аномалий, К+А — оба,
+    М — ни один эксперт не превысил свой порог, алерт поднял мета-слой; «—» — прогон до ансамбля.
+    «Ответный» — поток записан от отвечающей стороны, атакующий — вторая сторона.</p>
   {{ pager(alerts.page, alerts.pages, alerts.href, alerts.hx, '#alerts') }}
   {% endif %}
 </div>

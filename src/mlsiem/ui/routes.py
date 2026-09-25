@@ -304,7 +304,9 @@ def install(app: FastAPI, cfg: SocConfig, detector_dir: Path) -> None:
             run = store.get_run(conn, run_id)
         except store.NotFound as exc:
             return not_found(request, conn, exc.message)
-        probs = views.alert_probs(cfg, run, flow_uid, detector_dir)
+        probs = views.alert_probs(
+            cfg, run, flow_uid, detector_dir, alert=store.get_alert(conn, run_id, flow_uid)
+        )
         return fragment_page(request, conn, "fragments/_probs.html", {"p": probs, "run_id": run_id})
 
     @router.get("/fragments/incidents/{incident_id}/timeline")

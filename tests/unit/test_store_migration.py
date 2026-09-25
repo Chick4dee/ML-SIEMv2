@@ -64,7 +64,8 @@ def test_migrate_002_database(tmp_path):
     assert len(before) >= 5
 
     assert store.init_db(conn) is True
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 2
+    # Фича 004: цепочка 0 → 2 → 3 проходит за один init_db
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 3
 
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(incidents)")]
     assert "assignee" in cols
@@ -103,10 +104,10 @@ def test_second_init_changes_nothing(tmp_path):
     )
 
 
-def test_new_file_gets_schema_2(tmp_path):
+def test_new_file_gets_current_schema(tmp_path):
     conn = store.connect(tmp_path / "new.db")
     assert store.init_db(conn) is False
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
     assert "assignee" in [r["name"] for r in conn.execute("PRAGMA table_info(incidents)")]
     store.append_audit(conn, "vlad", "incident_assigned")
     assert {"ix_alerts_run_time", "ix_incidents_assignee"} <= _names(conn, "index")
@@ -115,7 +116,7 @@ def test_new_file_gets_schema_2(tmp_path):
 def test_newer_database_refused(tmp_path):
     conn = store.connect(tmp_path / "future.db")
     store.init_db(conn)
-    conn.execute("PRAGMA user_version = 3")
+    conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 1}")
     with pytest.raises(store.SchemaTooNew, match="новее"):
         store.init_db(conn)
 

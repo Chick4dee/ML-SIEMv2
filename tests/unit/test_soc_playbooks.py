@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mlsiem.soc.config import load_soc_config
+from mlsiem.soc.config import Rule, load_soc_config
 from mlsiem.soc.playbooks import propose_action, simulate
 
 REPO = Path(__file__).parents[2]
@@ -69,7 +69,12 @@ def test_first_match_wins():
     # exploits с одной целью подходит и под intrusion_single_target, и под intrusion_many_targets
     a = propose_action(inc("exploits", ["10.0.0.5"]), RULES, ())
     assert a["rule_id"] == "intrusion_single_target"
-    reordered = (RULES[0], RULES[2], RULES[1], *RULES[3:])
+    # Меняем местами два правила вторжений по id (индексы сдвигаются, когда в конфиг
+    # добавляют правила — например, unknown_class в фиче 004)
+    ids = [r.id for r in RULES]
+    i, j = ids.index("intrusion_single_target"), ids.index("intrusion_many_targets")
+    reordered = list(RULES)
+    reordered[i], reordered[j] = reordered[j], reordered[i]
     assert (
         propose_action(inc("exploits", ["10.0.0.5"]), reordered, ())["rule_id"]
         == "intrusion_many_targets"
@@ -91,3 +96,40 @@ def test_simulation_is_description_only():
     assert "наблюдение продолжено" in obs["description"]
     mr = simulate(propose_action(inc("dos", ["1.1.1.1"]), RULES, ("175.45.176.1",)))
     assert "ручной разбор" in mr["description"]
+
+
+# ---------------------------------------------------------------- фича 004: класс anomaly
+
+
+@pytest.mark.parametrize("severity", ["low", "medium", "high", "critical"])
+@pytest.mark.parametrize("targets", [["10.0.0.5"], ["10.0.0.5", "10.0.0.6", "10.0.0.7"]])
+def test_anomaly_always_manual_review(severity, targets):
+    a = propose_action(inc("anomaly", targets, severity), RULES, ())
+    assert (a["action_type"], a["target"], a["rule_id"]) == ("manual_review", None, "unknown_class")
+    assert "класс атаки неизвестен" in a["rule_text"]
+
+
+def test_anomaly_guard_without_rule():
+    # Правило unknown_class убрали — страховка в коде всё равно не даст блокировать
+    rules = [r for r in RULES if r.id != "unknown_class"]
+    a = propose_action(inc("anomaly", ["10.0.0.5"]), rules, ())
+    # без правила аномалия падает в default (наблюдать) — сетевого действия нет
+    assert a["action_type"] == "observe"
+    blocking = [Rule("block_all", {}, "block_source_ip")]
+    a = propose_action(inc("anomaly", ["10.0.0.5"]), blocking, ())
+    assert (a["action_type"], a["target"], a["rule_id"]) == ("manual_review", None, "anomaly_guard")
+    assert "класс атаки неизвестен" in a["rule_text"]
+
+
+def test_anomaly_guard_when_rule_below_noisy():
+    # Правило стоит ниже блокирующего — страховка всё равно срабатывает
+    isolate = Rule("isolate_everything", {}, "isolate_host")
+    rules = [r for r in RULES if r.id != "unknown_class"]
+    rules.insert(1, isolate)
+    a = propose_action(inc("anomaly", ["10.0.0.5"]), rules, ())
+    assert (a["action_type"], a["rule_id"]) == ("manual_review", "anomaly_guard")
+
+
+def test_other_classes_unchanged_by_guard():
+    a = propose_action(inc("dos", ["10.0.0.5"], "medium"), RULES, ())
+    assert (a["action_type"], a["rule_id"]) == ("block_source_ip", "noisy_attack")

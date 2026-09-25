@@ -11,6 +11,11 @@ socket, os.system, вызовов файрвола или сетевых биб�
 Защищённые адреса (FR-020) проверяются дважды: правилом `protected` из конфига и ещё раз
 здесь, после выбора правила. Если кто-то уберёт правило из конфига или поставит его не
 первым, блокировка или изоляция защищённого адреса всё равно не будет предложена.
+
+Так же дважды защищён класс «аномалия» (фича 004, FR-017, research R12): сработал только
+детектор аномалий, и что это за атака, неизвестно. Правило `unknown_class` в конфиге и
+страховка `anomaly_guard` здесь: блокировать или изолировать по такому инциденту
+автоматически нельзя — только ручной разбор.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from mlsiem.detect.metrics import ANOMALY_CLASS
 from mlsiem.soc.config import SEVERITY_LEVELS, Rule
 
 ACTION_TITLES = {
@@ -27,6 +33,9 @@ ACTION_TITLES = {
     "manual_review": "требуется ручной разбор",
 }
 GUARD_RULE_ID = "protected_guard"
+ANOMALY_GUARD_RULE_ID = "anomaly_guard"
+# Действия, которые меняют сеть (в симуляции) — их страховки и не пропускают
+NETWORK_ACTIONS = ("block_source_ip", "isolate_host")
 
 
 def _targets(incident: dict) -> list[str]:
@@ -63,7 +72,10 @@ def describe_rule(rule: Rule) -> str:
             if w["protected"]
             else "адреса не в защищённом списке"
         )
-    if "class_in" in w:
+    if "class_in" in w and list(w["class_in"]) == [ANOMALY_CLASS]:
+        # Правило unknown_class (фича 004): аналитику важнее смысл, чем код класса
+        parts.append("класс атаки неизвестен (anomaly — сработал только детектор аномалий)")
+    elif "class_in" in w:
         parts.append("класс ∈ {" + ", ".join(w["class_in"]) + "}")
     if "max_targets" in w:
         parts.append(f"уникальных целей ≤ {w['max_targets']}")
@@ -99,6 +111,13 @@ def propose_action(
         if target is None:
             action_type, rule_id = "manual_review", GUARD_RULE_ID
             rule_text += "; целей несколько, изолировать один хост нельзя → требуется ручной разбор"
+
+    if incident["attack_class"] == ANOMALY_CLASS and action_type in NETWORK_ACTIONS:
+        action_type, target, rule_id = "manual_review", None, ANOMALY_GUARD_RULE_ID
+        rule_text += (
+            "; класс атаки неизвестен (сработал только детектор аномалий) → "
+            "требуется ручной разбор (FR-017)"
+        )
 
     if target is not None and target in set(protected_ips):
         action_type, target, rule_id = "manual_review", None, GUARD_RULE_ID

@@ -1,6 +1,10 @@
 """Группировка алертов в инциденты и серьёзность (FR-012, FR-013, research R9, R10).
 
-Группировка: ключ — (src_ip, класс атаки). Алерты ключа идут по времени начала потока
+Группировка: ключ — (атакующая сторона, класс атаки). С фичи 004 атакующая сторона —
+`attacker_ip` алерта: для ответного потока «сервер → клиент» это клиент, а не src_ip
+(правило направления — soc/direction.py, research R8). Цели инцидента — `victim_ip`.
+Если у алертов нет этих полей (вызовы 002 и их тесты), атакующий = src_ip, как было.
+Алерты ключа идут по времени начала потока
 (при равенстве — по flow_uid); если до предыдущего алерта того же ключа прошло больше
 `window_ms`, открывается новый инцидент. Граница включительная: ровно `window_ms` — ещё
 тот же инцидент. Делается векторно в polars: diff внутри ключа → признак разрыва →
@@ -20,7 +24,7 @@ import polars as pl
 from mlsiem.soc.config import SEVERITY_LEVELS
 from mlsiem.soc.store import input_digest
 
-KEY = ["src_ip", "predicted_class"]
+KEY = ["attacker_ip", "predicted_class"]
 
 
 def severity(
@@ -80,6 +84,10 @@ def group_alerts(
         )
         return alerts.with_columns(pl.lit(None, pl.String).alias("incident_id")), empty_incidents
 
+    if "attacker_ip" not in alerts.columns:
+        alerts = alerts.with_columns(
+            pl.col("src_ip").alias("attacker_ip"), pl.col("dst_ip").alias("victim_ip")
+        )
     ordered = alerts.sort([*KEY, "first_seen_ms", "flow_uid"])
     ordered = ordered.with_columns(
         (pl.col("first_seen_ms").diff().over(KEY).fill_null(0) > window_ms)
@@ -94,7 +102,7 @@ def group_alerts(
         pl.len().cast(pl.Int64).alias("n_alerts"),
         pl.col("attack_score").max().alias("max_score"),
         pl.col("attack_score").mean().alias("mean_score"),
-        pl.col("dst_ip").drop_nulls().unique().sort().alias("_targets"),
+        pl.col("victim_ip").drop_nulls().unique().sort().alias("_targets"),
     )
 
     rows = []
@@ -102,10 +110,11 @@ def group_alerts(
         level, reason = severity(g["predicted_class"], g["n_alerts"], severity_base, bump_at)
         rows.append(
             {
+                # src_ip инцидента — атакующая сторона ключа (имя колонки — как в 002)
                 "incident_id": incident_id(
-                    run_id, g["src_ip"], g["predicted_class"], g["first_seen_ms"]
+                    run_id, g["attacker_ip"], g["predicted_class"], g["first_seen_ms"]
                 ),
-                "src_ip": g["src_ip"],
+                "src_ip": g["attacker_ip"],
                 "attack_class": g["predicted_class"],
                 "_seq": g["_seq"],
                 "targets": json.dumps(list(g["_targets"]), ensure_ascii=False),
@@ -120,7 +129,10 @@ def group_alerts(
         )
     incidents = pl.DataFrame(rows, schema_overrides={"src_ip": pl.String})
     mapping = incidents.select(
-        pl.col("src_ip"), pl.col("attack_class").alias("predicted_class"), "_seq", "incident_id"
+        pl.col("src_ip").alias("attacker_ip"),
+        pl.col("attack_class").alias("predicted_class"),
+        "_seq",
+        "incident_id",
     )
     with_incident = (
         ordered.join(mapping, on=[*KEY, "_seq"], how="left").drop("_seq").sort("flow_uid")
