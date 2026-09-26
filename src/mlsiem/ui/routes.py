@@ -86,7 +86,7 @@ def static_version() -> str:
     return h.hexdigest()[:10]
 
 
-def install(app: FastAPI, cfg: SocConfig, detector_dir: Path) -> None:
+def install(app: FastAPI, cfg: SocConfig, detector_dir: Path, stream_cfg=None) -> None:
     """Подключает консоль к приложению API 002: статика, заголовки, страницы, ошибки."""
     templates = Jinja2Templates(directory=HERE / "templates")
     templates.env.globals["static_v"] = static_version()
@@ -208,6 +208,9 @@ def install(app: FastAPI, cfg: SocConfig, detector_dir: Path) -> None:
         ctx: dict[str, Any] = {"run_id": run_id, "warnings": warnings, "run_action": "/"}
         if run_id:
             ctx["d"] = views.dashboard(conn, cfg, run_id)
+            if ctx["d"]["stream"]:
+                ttl = stream_cfg.consumer.lease_ttl_s if stream_cfg is not None else 30
+                ctx["s"] = views.stream_panel(conn, run_id, ttl)
             ctx["recent"] = store.recent_alerts(conn, run_id, cfg.ui.recent_alerts)
             ctx["recent_etag"] = ctx["d"]["etag"]
         return render(request, conn, "dashboard.html", ctx)
@@ -240,6 +243,24 @@ def install(app: FastAPI, cfg: SocConfig, detector_dir: Path) -> None:
         }
         return fragment_page(
             request, conn, "fragments/_recent_alerts.html", ctx, headers={"ETag": etag}
+        )
+
+    @router.get("/fragments/stream-panel")
+    def stream_panel(request: Request, run: str, conn=Depends(db)):
+        # Блок «Поток» (фича 005): опрос раз в refresh секунд, 204 — если ничего не изменилось
+        ttl = stream_cfg.consumer.lease_ttl_s if stream_cfg is not None else 30
+        try:
+            s = views.stream_panel(conn, run, ttl)
+        except store.NotFound as exc:
+            return not_found(request, conn, exc.message)
+        if etag_matches(request, s["etag"]):
+            return Response(status_code=204)
+        return fragment_page(
+            request,
+            conn,
+            "fragments/_stream_panel.html",
+            {"run_id": run, "s": s},
+            headers={"ETag": s["etag"]},
         )
 
     @router.get("/fragments/runs-banner")

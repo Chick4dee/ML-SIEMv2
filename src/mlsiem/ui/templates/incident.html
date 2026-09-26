@@ -4,6 +4,16 @@
 {% block content %}
 <p class="back"><a href="/incidents?run={{ inc.run_id | urlencode }}">← к списку инцидентов прогона</a></p>
 <h1>Инцидент <code>{{ inc.incident_id }}</code></h1>
+{% if inc.merged_into %}
+<p class="note merged-note" role="status">Инцидент объединён с
+  <a href="/incidents/{{ inc.merged_into | urlencode }}">{{ inc.merged_into }}</a>: опоздавший поток
+  связал их в один, все алерты перенесены туда.</p>
+{% endif %}
+{% if inc.alerts_after_decision %}
+<p class="note after-note" role="status">Новые алерты после решения: <strong>{{ inc.alerts_after_decision }}</strong>,
+  первый — <span class="time">{{ inc.first_after_decision_ms | utc_ms }}</span>. Статус, резолюция и решение по
+  действию не изменены — посмотрите, не нужно ли пересмотреть решение.</p>
+{% endif %}
 
 <section class="summary">
   <dl class="facts">

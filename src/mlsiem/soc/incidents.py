@@ -48,6 +48,61 @@ def severity(
     return level, reason
 
 
+# Поля инцидента из его алертов — ОДНИ выражения для пакетной группировки (group_by … agg) и
+# для потоковой (фича 005: дописывание в инцидент пересчитывает поля по всем его алертам).
+# Так два режима не могут разойтись в том, что значит «последний алерт» или «цели».
+# last_alert_start_ms — максимум времени НАЧАЛА потоков алертов: правая граница окна
+# присоединения (research R8); last_seen_ms — время конца последнего потока, для аналитика.
+FIELD_AGGS = (
+    pl.col("first_seen_ms").min().alias("first_seen_ms"),
+    pl.col("last_seen_ms").max().alias("last_seen_ms"),
+    pl.col("first_seen_ms").max().alias("last_alert_start_ms"),
+    pl.len().cast(pl.Int64).alias("n_alerts"),
+    pl.col("attack_score").max().alias("max_score"),
+    pl.col("attack_score").mean().alias("mean_score"),
+    pl.col("victim_ip").drop_nulls().unique().sort().alias("_targets"),
+)
+
+
+def _finish_fields(
+    agg: dict, attack_class: str, severity_base: dict[str, str], bump_at: int
+) -> dict:
+    level, reason = severity(attack_class, agg["n_alerts"], severity_base, bump_at)
+    return {
+        "targets": json.dumps(list(agg["_targets"]), ensure_ascii=False),
+        "first_seen_ms": agg["first_seen_ms"],
+        "last_seen_ms": agg["last_seen_ms"],
+        "last_alert_start_ms": agg["last_alert_start_ms"],
+        "n_alerts": agg["n_alerts"],
+        "max_score": agg["max_score"],
+        "mean_score": agg["mean_score"],
+        "severity": level,
+        "severity_reason": reason,
+    }
+
+
+def incident_fields(
+    alerts_of_incident: pl.DataFrame,
+    attack_class: str,
+    severity_base: dict[str, str],
+    bump_at: int,
+) -> dict:
+    """Поля инцидента по ВСЕМ его алертам: границы, число, скоры, цели (`victim_ip`),
+    серьёзность с пояснением. Нужны колонки first_seen_ms, last_seen_ms, attack_score,
+    victim_ip. Алерты сортируются как в пакетной группировке — чтобы и средний скор
+    складывался в том же порядке."""
+    ordered = alerts_of_incident.sort(["first_seen_ms", "flow_uid"])
+    # Через group_by по одной «группе», а не select: в agg список целей собирается списком
+    # ровно так же, как в пакетной группировке (в select он был бы колонкой)
+    agg = (
+        ordered.with_columns(pl.lit(0).alias("_one"))
+        .group_by("_one", maintain_order=True)
+        .agg(FIELD_AGGS)
+        .row(0, named=True)
+    )
+    return _finish_fields(agg, attack_class, severity_base, bump_at)
+
+
 def incident_id(run_id: str, src_ip: str, attack_class: str, first_seen_ms: int) -> str:
     """`inc-<хеш12>` от прогона, ключа и времени первого алерта — детерминирован, не счётчик."""
     return "inc-" + input_digest(run_id, str(src_ip), attack_class, str(first_seen_ms))[:12]
@@ -75,6 +130,7 @@ def group_alerts(
                 "targets": pl.String,
                 "first_seen_ms": pl.Int64,
                 "last_seen_ms": pl.Int64,
+                "last_alert_start_ms": pl.Int64,
                 "n_alerts": pl.Int64,
                 "max_score": pl.Float64,
                 "mean_score": pl.Float64,
@@ -96,18 +152,10 @@ def group_alerts(
         .over(KEY)
         .alias("_seq")
     )
-    groups = ordered.group_by([*KEY, "_seq"], maintain_order=True).agg(
-        pl.col("first_seen_ms").min().alias("first_seen_ms"),
-        pl.col("last_seen_ms").max().alias("last_seen_ms"),
-        pl.len().cast(pl.Int64).alias("n_alerts"),
-        pl.col("attack_score").max().alias("max_score"),
-        pl.col("attack_score").mean().alias("mean_score"),
-        pl.col("victim_ip").drop_nulls().unique().sort().alias("_targets"),
-    )
+    groups = ordered.group_by([*KEY, "_seq"], maintain_order=True).agg(FIELD_AGGS)
 
     rows = []
     for g in groups.iter_rows(named=True):
-        level, reason = severity(g["predicted_class"], g["n_alerts"], severity_base, bump_at)
         rows.append(
             {
                 # src_ip инцидента — атакующая сторона ключа (имя колонки — как в 002)
@@ -117,14 +165,7 @@ def group_alerts(
                 "src_ip": g["attacker_ip"],
                 "attack_class": g["predicted_class"],
                 "_seq": g["_seq"],
-                "targets": json.dumps(list(g["_targets"]), ensure_ascii=False),
-                "first_seen_ms": g["first_seen_ms"],
-                "last_seen_ms": g["last_seen_ms"],
-                "n_alerts": g["n_alerts"],
-                "max_score": g["max_score"],
-                "mean_score": g["mean_score"],
-                "severity": level,
-                "severity_reason": reason,
+                **_finish_fields(g, g["predicted_class"], severity_base, bump_at),
             }
         )
     incidents = pl.DataFrame(rows, schema_overrides={"src_ip": pl.String})

@@ -41,11 +41,21 @@ AUDIT_EVENTS = (
     "run_loaded",
     # фича 003: назначение ответственного
     "incident_assigned",
+    # фича 005: инцидент растёт в потоке, сливается, плейбук пересчитывает предложение,
+    # сеанс меняет статус — всё от имени system (data-model «Аудит — новые события»)
+    "incident_updated",
+    "incident_merged",
+    "action_reproposed",
+    "session_status_changed",
 )
+# Режим и статус прогона (фича 005): пакетный прогон всегда «завершён», онлайн-сеанс живёт
+RUN_MODES = ("batch", "stream")
+RUN_STATUSES = ("running", "stopped", "completed")
 SYSTEM_ACTOR = "system"
 # Версия схемы в PRAGMA user_version. База фичи 002 имеет 0 (единица зарезервирована как
-# «схема 002», чтобы явно отличать её от пустого файла); фича 003 вводит версию 2, фича 004 — 3
-SCHEMA_VERSION = 3
+# «схема 002», чтобы явно отличать её от пустого файла); фича 003 вводит версию 2, фича 004 — 3,
+# фича 005 — 4
+SCHEMA_VERSION = 4
 
 
 # ---------------------------------------------------------------- ошибки
@@ -130,6 +140,72 @@ INDEXES_V3 = (
 )
 INDEXES_V3_DDL = "".join(f"{stmt};\n" for stmt in INDEXES_V3)
 
+# Индексы фичи 005: сеанс ищется по источнику (он же его уникальный ключ — повторное
+# проигрывание того же входа идёт новым источником и новым сеансом), фильтр «новые алерты
+# после решения» — по счётчику в пределах прогона
+INDEXES_V4 = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_runs_source ON runs(source_id) "
+    "WHERE source_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_incidents_after_decision "
+    "ON incidents(run_id, alerts_after_decision)",
+)
+INDEXES_V4_DDL = "".join(f"{stmt};\n" for stmt in INDEXES_V4)
+
+# Служебные таблицы потока (фича 005, data-model «Служебные таблицы потока»):
+# - stream_offsets — позиция чтения каждой партиции, пишется в ТОЙ ЖЕ транзакции, что и
+#   результат пачки: это источник истины при перезапуске потребителя (research R7);
+# - stream_seen — какие потоки сеанса уже обработаны: повторная доставка отсекается здесь;
+# - stream_lease — аренда единственного потребителя (FR-019);
+# - stream_stats — показатели для `stream status` и панели (хранятся сутки, это не аудит);
+# - stream_divergences — известные причины расхождения с пакетным режимом (FR-021)
+STREAM_TABLES = (
+    """CREATE TABLE IF NOT EXISTS stream_offsets (
+    topic            TEXT NOT NULL,
+    partition        INTEGER NOT NULL,
+    next_offset      INTEGER NOT NULL,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (topic, partition)
+)""",
+    """CREATE TABLE IF NOT EXISTS stream_seen (
+    run_id           TEXT NOT NULL REFERENCES runs(run_id),
+    flow_uid         TEXT NOT NULL,
+    seq              INTEGER NOT NULL,
+    PRIMARY KEY (run_id, flow_uid)
+)""",
+    """CREATE TABLE IF NOT EXISTS stream_lease (
+    name             TEXT PRIMARY KEY,
+    holder           TEXT NOT NULL,
+    acquired_at      TEXT NOT NULL,
+    renewed_at       TEXT NOT NULL
+)""",
+    """CREATE TABLE IF NOT EXISTS stream_stats (
+    stat_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at               TEXT NOT NULL,
+    run_id           TEXT NOT NULL,
+    processed        INTEGER NOT NULL,
+    lag_messages     INTEGER,
+    lag_seconds      REAL,
+    latency_p50_ms   REAL,
+    latency_p95_ms   REAL,
+    rejected         INTEGER NOT NULL,
+    late             INTEGER NOT NULL,
+    rate_per_s       REAL
+)""",
+    """CREATE TABLE IF NOT EXISTS stream_divergences (
+    divergence_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id           TEXT NOT NULL,
+    kind             TEXT NOT NULL,
+    incident_id      TEXT,
+    other_incident_id TEXT,
+    flow_uid         TEXT,
+    at               TEXT NOT NULL,
+    details          TEXT NOT NULL
+)""",
+    "CREATE INDEX IF NOT EXISTS ix_stream_stats_run ON stream_stats(run_id, at)",
+    "CREATE INDEX IF NOT EXISTS ix_stream_seen_seq ON stream_seen(run_id, seq)",
+)
+STREAM_TABLES_DDL = "".join(f"{stmt};\n" for stmt in STREAM_TABLES)
+
 DDL = f"""
 CREATE TABLE IF NOT EXISTS runs (
     run_id           TEXT PRIMARY KEY,
@@ -143,7 +219,13 @@ CREATE TABLE IF NOT EXISTS runs (
     n_alerts         INTEGER NOT NULL,
     n_incidents      INTEGER NOT NULL,
     summary          TEXT NOT NULL,
-    warnings         TEXT NOT NULL
+    warnings         TEXT NOT NULL,
+    -- фича 005: пакетный прогон или онлайн-сеанс, статус сеанса, его источник
+    mode             TEXT NOT NULL DEFAULT 'batch' CHECK (mode IN {_in(RUN_MODES)}),
+    status           TEXT NOT NULL DEFAULT 'completed' CHECK (status IN {_in(RUN_STATUSES)}),
+    source_id        TEXT,
+    last_activity_at TEXT,
+    model_version    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS incidents (
@@ -164,7 +246,12 @@ CREATE TABLE IF NOT EXISTS incidents (
     version          INTEGER NOT NULL DEFAULT 1,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
-    assignee         TEXT
+    assignee         TEXT,
+    -- фича 005: дописывание в потоке (research R8, R9)
+    merged_into      TEXT,
+    alerts_after_decision INTEGER NOT NULL DEFAULT 0,
+    first_after_decision_ms INTEGER,
+    last_alert_start_ms INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -190,6 +277,9 @@ CREATE TABLE IF NOT EXISTS alerts (
     fired_experts    TEXT,
     experts          TEXT,
     explanation      TEXT,
+    -- фича 005: опоздавший поток и когда потребитель записал алерт (для задержки)
+    late             INTEGER NOT NULL DEFAULT 0,
+    received_at      TEXT,
     UNIQUE (run_id, flow_uid)
 );
 
@@ -227,7 +317,7 @@ CREATE INDEX IF NOT EXISTS ix_incidents_status ON incidents(status);
 CREATE INDEX IF NOT EXISTS ix_incidents_class ON incidents(attack_class);
 CREATE INDEX IF NOT EXISTS ix_alerts_incident ON alerts(incident_id, first_seen_ms);
 CREATE INDEX IF NOT EXISTS ix_history_incident ON incident_history(incident_id);
-{INDEXES_V2_DDL}{INDEXES_V3_DDL}"""
+{INDEXES_V2_DDL}{INDEXES_V3_DDL}{STREAM_TABLES_DDL}{INDEXES_V4_DDL}"""
 
 # Миграция схемы 002 (0) → 2. Шаги выполняются по одному внутри ОДНОЙ транзакции (см.
 # `migrate`): executescript здесь нельзя — он сам делает COMMIT перед началом.
@@ -271,6 +361,40 @@ MIGRATION_V3: tuple[str, ...] = (
     "PRAGMA user_version = 3",
 )
 
+# Миграция схемы 3 (фича 004) → 4 (фича 005), одной транзакцией (data-model «Миграция 3 → 4»).
+# Колонки и таблицы только добавляются. Аудит пересоздаётся ровно как в миграции 0 → 2 и по
+# той же причине: у него появились четыре новых события, а CHECK в SQLite не меняется
+# ALTER TABLE. entry_id сохраняются, триггеры запрета ставятся заново в той же транзакции.
+# Старым инцидентам заполняется last_alert_start_ms — максимум времени начала их алертов:
+# это правая граница окна присоединения (research R8); колонка должна значить одно и то же
+# у всех инцидентов, пакетных и потоковых.
+MIGRATION_V4: tuple[str, ...] = (
+    "ALTER TABLE runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'batch' "
+    f"CHECK (mode IN {_in(RUN_MODES)})",
+    "ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed' "
+    f"CHECK (status IN {_in(RUN_STATUSES)})",
+    "ALTER TABLE runs ADD COLUMN source_id TEXT",
+    "ALTER TABLE runs ADD COLUMN last_activity_at TEXT",
+    "ALTER TABLE runs ADD COLUMN model_version TEXT",
+    "ALTER TABLE incidents ADD COLUMN merged_into TEXT",
+    "ALTER TABLE incidents ADD COLUMN alerts_after_decision INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE incidents ADD COLUMN first_after_decision_ms INTEGER",
+    "ALTER TABLE incidents ADD COLUMN last_alert_start_ms INTEGER",
+    "UPDATE incidents SET last_alert_start_ms = (SELECT MAX(a.first_seen_ms) FROM alerts a "
+    "WHERE a.incident_id = incidents.incident_id)",
+    "ALTER TABLE alerts ADD COLUMN late INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE alerts ADD COLUMN received_at TEXT",
+    *STREAM_TABLES,
+    "ALTER TABLE audit_log RENAME TO audit_log_v3",
+    AUDIT_TABLE_DDL,
+    "INSERT INTO audit_log (entry_id, at, actor, event, run_id, incident_id, action_id, details) "
+    "SELECT entry_id, at, actor, event, run_id, incident_id, action_id, details FROM audit_log_v3",
+    "DROP TABLE audit_log_v3",
+    *AUDIT_GUARDS,
+    *INDEXES_V4,
+    "PRAGMA user_version = 4",
+)
+
 
 def now_iso() -> str:
     """Текущее время в ISO-8601 UTC с точностью до миллисекунд."""
@@ -298,10 +422,11 @@ def init_db(conn: sqlite3.Connection) -> bool:
     """Готовит базу к работе и возвращает True, если пришлось мигрировать схему.
 
     Случаи по `PRAGMA user_version` и наличию таблиц:
-    - пустой файл → сразу схема 3;
-    - схема 002 (версия 0 или 1, таблицы есть) → `MIGRATION_V2`, затем `MIGRATION_V3`;
-    - схема 2 (фича 003) → `MIGRATION_V3`;
-    - схема 3 → только IF NOT EXISTS (ничего не меняется);
+    - пустой файл → сразу схема 4;
+    - схема 002 (версия 0 или 1, таблицы есть) → `MIGRATION_V2`, `MIGRATION_V3`, `MIGRATION_V4`;
+    - схема 2 (фича 003) → `MIGRATION_V3`, затем `MIGRATION_V4`;
+    - схема 3 (фича 004) → `MIGRATION_V4`;
+    - схема 4 → только IF NOT EXISTS (ничего не меняется);
     - версия больше известной → `SchemaTooNew`: база от более нового кода, трогать нельзя.
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -325,17 +450,17 @@ def init_db(conn: sqlite3.Connection) -> bool:
 def migrate(conn: sqlite3.Connection) -> None:
     """Доводит базу до текущей схемы; каждый шаг цепочки — своей транзакцией.
 
-    0 → 2 (фича 003) и 2 → 3 (фича 004). Сбой посреди шага откатывает только этот шаг:
-    база остаётся целиком в предыдущей схеме, и повторный запуск продолжит с неё.
+    0 → 2 (фича 003), 2 → 3 (фича 004) и 3 → 4 (фича 005). Сбой посреди шага откатывает только
+    этот шаг: база остаётся целиком в предыдущей схеме, и повторный запуск продолжит с неё.
+    Списки шагов читаются из модуля в момент вызова — тесты подменяют их, чтобы уронить шаг.
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version < 2:
-        with transaction(conn):
-            for step in MIGRATION_V2:
-                conn.execute(step)
-    with transaction(conn):
-        for step in MIGRATION_V3:
-            conn.execute(step)
+    for target, steps in ((2, MIGRATION_V2), (3, MIGRATION_V3), (4, MIGRATION_V4)):
+        if version < target:
+            with transaction(conn):
+                for step in steps:
+                    conn.execute(step)
+            version = target
 
 
 @contextlib.contextmanager
@@ -449,6 +574,7 @@ INCIDENT_COLUMNS = (
     "version",
     "created_at",
     "updated_at",
+    "last_alert_start_ms",
 )
 ACTION_COLUMNS = (
     "action_id",
@@ -501,8 +627,8 @@ def write_run(
     with transaction(conn):
         conn.execute(
             'INSERT INTO runs (run_id, source, input_hash, detector_version, "limit", started_at, '
-            "finished_at, n_flows, n_alerts, n_incidents, summary, warnings) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "finished_at, n_flows, n_alerts, n_incidents, summary, warnings, mode, status, "
+            "model_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'batch', 'completed', ?)",
             (
                 run_id,
                 run["source"],
@@ -516,6 +642,7 @@ def write_run(
                 len(incidents),
                 _json(run.get("summary") or {}),
                 _json(run.get("warnings") or []),
+                run["detector_version"],
             ),
         )
         _insert_many(
@@ -524,6 +651,7 @@ def write_run(
             INCIDENT_COLUMNS,
             (
                 {
+                    "last_alert_start_ms": None,
                     **i,
                     "run_id": run_id,
                     "status": "new",
@@ -548,6 +676,15 @@ def write_run(
                 }
                 for a in alerts
             ),
+        )
+        # Правая граница окна инцидента (фича 005) — максимум времени начала его алертов. У
+        # группировки она уже посчитана; вызовы 002/003 (и их тесты) её не передают — тогда
+        # её считает база по только что записанным алертам
+        conn.execute(
+            "UPDATE incidents SET last_alert_start_ms = (SELECT MAX(a.first_seen_ms) "
+            "FROM alerts a WHERE a.incident_id = incidents.incident_id) "
+            "WHERE run_id = ? AND last_alert_start_ms IS NULL",
+            (run_id,),
         )
         for a in actions or []:
             _insert_many(
@@ -631,7 +768,8 @@ def list_runs(conn: sqlite3.Connection) -> list[dict]:
         for r in conn.execute("SELECT * FROM runs ORDER BY started_at DESC, run_id DESC")
     ]
     counts = conn.execute(
-        "SELECT run_id, status, COUNT(*) AS n FROM incidents GROUP BY run_id, status"
+        "SELECT run_id, status, COUNT(*) AS n FROM incidents WHERE merged_into IS NULL "
+        "GROUP BY run_id, status"
     ).fetchall()
     by_run: dict[str, dict[str, int]] = {}
     for c in counts:
@@ -1036,6 +1174,15 @@ def _incident_filters(conn: sqlite3.Connection, filters: dict) -> tuple[str, lis
         ids = list(filters["exclude_ids"])
         where.append(f"i.incident_id NOT IN ({_placeholders(ids)})")
         params += ids
+    # ---- фича 005
+    # «Новые алерты после решения» (FR-017): инциденты, в которые поток дописал алерты уже
+    # после решения аналитика
+    if filters.get("after_decision") == "only":
+        where.append("i.alerts_after_decision > 0")
+    # Поглощённые слиянием инциденты (у них 0 алертов и ссылка на поглотителя) по умолчанию
+    # скрыты. У пакетных прогонов merged_into всегда NULL — их выдача не меняется
+    if not filters.get("show_merged"):
+        where.append("i.merged_into IS NULL")
     return (" WHERE " + " AND ".join(where)) if where else "", params
 
 
@@ -1294,7 +1441,8 @@ def dashboard_summary(conn: sqlite3.Connection, run_id: str) -> dict:
         return {
             r[0]: r[1]
             for r in conn.execute(
-                f"SELECT {column}, COUNT(*) FROM incidents WHERE run_id = ? GROUP BY {column}",
+                f"SELECT {column}, COUNT(*) FROM incidents WHERE run_id = ? "
+                f"AND merged_into IS NULL GROUP BY {column}",
                 (run_id,),
             )
         }
@@ -1303,12 +1451,12 @@ def dashboard_summary(conn: sqlite3.Connection, run_id: str) -> dict:
     by_class = dict(sorted(grouped("attack_class").items(), key=lambda kv: (-kv[1], kv[0])))
     actions_pending = conn.execute(
         "SELECT COUNT(*) FROM actions a JOIN incidents i ON i.incident_id = a.incident_id "
-        "WHERE i.run_id = ? AND a.state = 'proposed'",
+        "WHERE i.run_id = ? AND a.state = 'proposed' AND i.merged_into IS NULL",
         (run_id,),
     ).fetchone()[0]
     unassigned = conn.execute(
         "SELECT COUNT(*) FROM incidents WHERE run_id = ? AND assignee IS NULL "
-        "AND status != 'closed'",
+        "AND status != 'closed' AND merged_into IS NULL",
         (run_id,),
     ).fetchone()[0]
     return {
@@ -1346,6 +1494,13 @@ def list_state(conn: sqlite3.Connection, run_id: str | None) -> str:
     ).fetchone()
     audit = conn.execute("SELECT MAX(entry_id) FROM audit_log").fetchone()[0]
     runs = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    # Фича 005: онлайн-сеанс растёт — каждая записанная пачка двигает last_activity_at
+    # (у пакетных прогонов он NULL и ETag прежний)
+    activity = conn.execute(
+        "SELECT last_activity_at, status FROM runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    if activity is not None and activity[0] is not None:
+        runs = f"{runs}:{activity[0]}:{activity[1]}"
     return input_digest(run_id or "", *(str(x) for x in (*tuple(row), audit, runs)))[:16]
 
 
@@ -1371,3 +1526,584 @@ def run_assignees(conn: sqlite3.Connection, run_id: str) -> list[str]:
             (run_id,),
         )
     ]
+
+
+# ---------------------------------------------------------------- поток (фича 005)
+#
+# Онлайн-сеанс — это прогон с mode = 'stream' (data-model «Сеанс»). Его пишет потребитель
+# `mlsiem stream consume` пачками: каждая пачка — ОДНА транзакция, в которой вместе лежат
+# алерты, инциденты, действия, аудит, отметки обработанных потоков и позиция чтения брокера.
+# Поэтому после любого сбоя база либо содержит пачку целиком вместе с позицией, либо не
+# содержит ни того, ни другого — и перечитанные сообщения дадут ровно тот же результат
+# (research R7).
+
+SESSION_PREFIX = "stream-"
+LEASE_NAME = "consumer"
+STATS_KEEP_HOURS = 24
+
+
+def session_run_id(source_id: str) -> str:
+    """`stream-<хеш12>` от источника: один источник — один сеанс при любых перезапусках."""
+    return SESSION_PREFIX + input_digest(source_id)[:12]
+
+
+def session_by_source(conn: sqlite3.Connection, source_id: str) -> dict | None:
+    row = conn.execute("SELECT * FROM runs WHERE source_id = ?", (source_id,)).fetchone()
+    return _run_row(row) if row else None
+
+
+def create_session(
+    conn: sqlite3.Connection,
+    source_id: str,
+    *,
+    model_version: str,
+    summary: dict,
+    at: str | None = None,
+) -> dict:
+    """Новый сеанс `running` для источника (или уже существующий — идемпотентно).
+
+    `summary` — как у пакетного прогона 004 (model, experts, experts_meta, threshold, classes…)
+    плюс раздел `stream` со счётчиками; `run_loaded` пишется в аудит один раз, при создании.
+    """
+    existing = session_by_source(conn, source_id)
+    if existing is not None:
+        return existing
+    at = at or now_iso()
+    run_id = session_run_id(source_id)
+    stream = {
+        "n_rejected": 0,
+        "n_late": 0,
+        "n_merged": 0,
+        "n_after_decision": 0,
+        "end_received": False,
+        "last_seq": None,
+        "max_first_seen_ms": None,
+        "parts": 0,
+    }
+    with transaction(conn):
+        conn.execute(
+            'INSERT INTO runs (run_id, source, input_hash, detector_version, "limit", started_at, '
+            "finished_at, n_flows, n_alerts, n_incidents, summary, warnings, mode, status, "
+            "source_id, last_activity_at, model_version) "
+            "VALUES (?, ?, ?, ?, NULL, ?, ?, 0, 0, 0, ?, '[]', 'stream', 'running', ?, ?, ?)",
+            (
+                run_id,
+                f"stream:{source_id}",
+                input_digest(source_id),
+                model_version,
+                at,
+                at,
+                _json({**summary, "stream": {**stream, **summary.get("stream", {})}}),
+                source_id,
+                at,
+                model_version,
+            ),
+        )
+        append_audit(
+            conn,
+            SYSTEM_ACTOR,
+            "run_loaded",
+            run_id=run_id,
+            details={
+                "source": f"stream:{source_id}",
+                "mode": "stream",
+                "n_flows": 0,
+                "n_alerts": 0,
+                "n_incidents": 0,
+                "detector_version": model_version,
+            },
+            at=at,
+        )
+    return get_run(conn, run_id)
+
+
+def _set_status(conn, run_id: str, new: str, reason: str, at: str) -> bool:
+    """Смена статуса сеанса с аудитом; внутри уже открытой транзакции. True — изменился."""
+    if new not in RUN_STATUSES:
+        raise BadRequest(f"неизвестный статус сеанса {new!r}: допустимы {list(RUN_STATUSES)}")
+    row = conn.execute("SELECT status, mode FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    if row is None:
+        raise NotFound(f"сеанс {run_id} не найден")
+    if row["mode"] != "stream":
+        raise BadRequest(f"прогон {run_id} — пакетный, у него нет статуса сеанса")
+    if row["status"] == new:
+        return False
+    conn.execute("UPDATE runs SET status = ? WHERE run_id = ?", (new, run_id))
+    append_audit(
+        conn,
+        SYSTEM_ACTOR,
+        "session_status_changed",
+        run_id=run_id,
+        details={"old": row["status"], "new": new, "reason": reason},
+        at=at,
+    )
+    return True
+
+
+def set_session_status(conn: sqlite3.Connection, run_id: str, new: str, reason: str) -> bool:
+    """running | stopped | completed с записью в аудит (data-model «Переходы статуса»)."""
+    with transaction(conn):
+        return _set_status(conn, run_id, new, reason, now_iso())
+
+
+def load_offsets(conn: sqlite3.Connection) -> dict[tuple[str, int], int]:
+    """Позиции чтения брокера из SQLite — источник истины при старте потребителя (R7)."""
+    return {
+        (r["topic"], r["partition"]): r["next_offset"]
+        for r in conn.execute("SELECT topic, partition, next_offset FROM stream_offsets")
+    }
+
+
+def seen_flows(conn: sqlite3.Connection, run_id: str, flow_uids: list[str]) -> set[str]:
+    """Какие из потоков сеанса уже обработаны (повторная доставка отсекается здесь, FR-015)."""
+    out: set[str] = set()
+    for i in range(0, len(flow_uids), 500):
+        chunk = flow_uids[i : i + 500]
+        out |= {
+            r[0]
+            for r in conn.execute(
+                "SELECT flow_uid FROM stream_seen WHERE run_id = ? AND flow_uid IN "
+                f"({_placeholders(chunk)})",
+                [run_id, *chunk],
+            )
+        }
+    return out
+
+
+def seen_count(conn: sqlite3.Connection, run_id: str, max_seq: int) -> int:
+    """Сколько РАЗНЫХ потоков сеанса с seq ≤ max_seq уже обработано — для «всё до end»."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM stream_seen WHERE run_id = ? AND seq <= ?", (run_id, max_seq)
+    ).fetchone()[0]
+
+
+def _check_version(conn, incident_id: str, expected: int, action: dict | None) -> None:
+    row = conn.execute(
+        "SELECT i.version, a.state AS a_state, a.version AS a_version FROM incidents i "
+        "LEFT JOIN actions a ON a.incident_id = i.incident_id WHERE i.incident_id = ?",
+        (incident_id,),
+    ).fetchone()
+    if row is None:
+        raise Conflict(f"инцидент {incident_id} пропал — план пачки устарел")
+    if row["version"] != expected:
+        raise Conflict(
+            f"инцидент {incident_id} изменён, пока пачка готовилась (версия {expected} → "
+            f"{row['version']}) — план будет пересчитан"
+        )
+    if action is not None and (row["a_state"], row["a_version"]) != (
+        action["state"],
+        action["version"],
+    ):
+        raise Conflict(f"действие инцидента {incident_id} изменено — план будет пересчитан")
+
+
+def _action_details(a: dict) -> dict:
+    return {
+        "action_type": a["action_type"],
+        "target": a["target"],
+        "rule_id": a["rule_id"],
+        "rule_text": a["rule_text"],
+    }
+
+
+def _stream_alert_row(a: dict, run_id: str, received_at: str) -> tuple:
+    full = {**_alert_defaults(a), **a, "run_id": run_id, "alert_id": f"{run_id}/{a['flow_uid']}"}
+    return (*(full[c] for c in ALERT_COLUMNS), int(a.get("late") or 0), received_at)
+
+
+def _apply_plan(conn, plan, at: str) -> dict[str, int]:
+    """Один сеанс пачки внутри уже открытой транзакции. Возвращает прибавки к счётчикам."""
+    run_id = plan.run_id
+    counts = {"n_merged": 0, "n_after_decision": 0}
+    for u in plan.updates:
+        _check_version(conn, u.incident_id, u.expected_version, u.action)
+    for m in plan.merges:
+        _check_version(conn, m.absorbed_id, m.expected_version, m.action)
+
+    # 1. Новые инциденты (раньше слияний: поглотитель может быть новым)
+    for n in plan.new_incidents:
+        row = {
+            **n.row,
+            "run_id": run_id,
+            "status": "new",
+            "resolution": None,
+            "version": 1,
+            "created_at": at,
+            "updated_at": at,
+        }
+        _insert_many(conn, "incidents", INCIDENT_COLUMNS, [row])
+
+    # 2. Слияния: алерты поглощённого — в поглотителя, у поглощённого пометка и снятое
+    #    предложение. Статус и решения аналитика не трогаются — их и не было: по инциденту с
+    #    решением слияние не планируется вовсе (FR-017)
+    for m in plan.merges:
+        conn.execute(
+            "UPDATE alerts SET incident_id = ? WHERE incident_id = ?", (m.into_id, m.absorbed_id)
+        )
+        cur = conn.execute(
+            "UPDATE incidents SET merged_into = ?, n_alerts = 0, version = version + 1, "
+            "updated_at = ? WHERE incident_id = ? AND version = ?",
+            (m.into_id, at, m.absorbed_id, m.expected_version),
+        )
+        if cur.rowcount != 1:
+            raise Conflict(f"инцидент {m.absorbed_id} изменён — план будет пересчитан")
+        withdrawn = None
+        if m.action is not None and m.action["state"] == "proposed":
+            conn.execute(
+                "UPDATE actions SET state = 'rejected', decided_by = ?, decided_at = ?, "
+                "comment = ?, version = version + 1 WHERE action_id = ? AND version = ?",
+                (
+                    SYSTEM_ACTOR,
+                    at,
+                    f"инцидент объединён с {m.into_id} — предложение снято",
+                    m.action["action_id"],
+                    m.action["version"],
+                ),
+            )
+            withdrawn = m.action["action_id"]
+        append_audit(
+            conn,
+            SYSTEM_ACTOR,
+            "incident_merged",
+            run_id=run_id,
+            incident_id=m.absorbed_id,
+            action_id=withdrawn,
+            details={
+                "into": m.into_id,
+                "moved_alerts": m.moved_alerts,
+                "action_withdrawn": withdrawn,
+            },
+            at=at,
+        )
+        counts["n_merged"] += 1
+
+    # 3. Алерты пачки: повтор той же пары (сеанс, поток) игнорируется (FR-015)
+    conn.executemany(
+        f"INSERT OR IGNORE INTO alerts ({', '.join(ALERT_COLUMNS)}, late, received_at) "
+        f"VALUES ({', '.join('?' for _ in ALERT_COLUMNS)}, ?, ?)",
+        [_stream_alert_row(a, run_id, at) for a in plan.alerts],
+    )
+
+    # 4. Дописанные инциденты: поля по всем алертам, серьёзность — в историю, предложение —
+    #    пересчитать, если решения ещё нет (research R9)
+    for u in plan.updates:
+        f = u.fields
+        cur = conn.execute(
+            "UPDATE incidents SET targets = ?, first_seen_ms = ?, last_seen_ms = ?, "
+            "last_alert_start_ms = ?, n_alerts = ?, max_score = ?, mean_score = ?, severity = ?, "
+            "severity_reason = ?, alerts_after_decision = alerts_after_decision + ?, "
+            "first_after_decision_ms = ?, version = version + 1, updated_at = ? "
+            "WHERE incident_id = ? AND version = ?",
+            (
+                f["targets"],
+                f["first_seen_ms"],
+                f["last_seen_ms"],
+                f["last_alert_start_ms"],
+                f["n_alerts"],
+                f["max_score"],
+                f["mean_score"],
+                f["severity"],
+                f["severity_reason"],
+                u.after_decision_added,
+                u.first_after_decision_ms,
+                at,
+                u.incident_id,
+                u.expected_version,
+            ),
+        )
+        if cur.rowcount != 1:
+            raise Conflict(f"инцидент {u.incident_id} изменён — план будет пересчитан")
+        if f["severity"] != u.old_severity:
+            conn.execute(
+                "INSERT INTO incident_history (incident_id, at, analyst, field, old, new, comment) "
+                "VALUES (?, ?, ?, 'severity', ?, ?, ?)",
+                (
+                    u.incident_id,
+                    at,
+                    SYSTEM_ACTOR,
+                    u.old_severity,
+                    f["severity"],
+                    f["severity_reason"],
+                ),
+            )
+        append_audit(
+            conn,
+            SYSTEM_ACTOR,
+            "incident_updated",
+            run_id=run_id,
+            incident_id=u.incident_id,
+            details={
+                "added": u.added,
+                "moved": u.moved,
+                "n_alerts": f["n_alerts"],
+                "severity_old": u.old_severity,
+                "severity_new": f["severity"],
+                "after_decision": u.decided,
+            },
+            at=at,
+        )
+        counts["n_after_decision"] += u.after_decision_added
+        if u.new_action is not None and u.action is not None:
+            cur = conn.execute(
+                "UPDATE actions SET action_type = ?, target = ?, rule_id = ?, rule_text = ?, "
+                "version = version + 1 WHERE action_id = ? AND version = ? AND state = 'proposed'",
+                (
+                    u.new_action["action_type"],
+                    u.new_action["target"],
+                    u.new_action["rule_id"],
+                    u.new_action["rule_text"],
+                    u.action["action_id"],
+                    u.action["version"],
+                ),
+            )
+            if cur.rowcount != 1:
+                raise Conflict(f"действие {u.action['action_id']} изменено — план будет пересчитан")
+            append_audit(
+                conn,
+                SYSTEM_ACTOR,
+                "action_reproposed",
+                run_id=run_id,
+                incident_id=u.incident_id,
+                action_id=u.action["action_id"],
+                details={"old": _action_details(u.action), "new": _action_details(u.new_action)},
+                at=at,
+            )
+
+    # 5. Предложения новых инцидентов — как в пакетном прогоне
+    for n in plan.new_incidents:
+        a = n.action
+        _insert_many(conn, "actions", ACTION_COLUMNS, [{**a, "state": "proposed", "version": 1}])
+        append_audit(
+            conn,
+            SYSTEM_ACTOR,
+            "action_proposed",
+            run_id=run_id,
+            incident_id=a["incident_id"],
+            action_id=a["action_id"],
+            details=_action_details(a),
+            at=at,
+        )
+
+    # 6. Известные причины расхождения с пакетным режимом (FR-021)
+    conn.executemany(
+        "INSERT INTO stream_divergences (run_id, kind, incident_id, other_incident_id, flow_uid, "
+        "at, details) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                run_id,
+                d["kind"],
+                d.get("incident_id"),
+                d.get("other_incident_id"),
+                d.get("flow_uid"),
+                at,
+                _json(d.get("details") or {}),
+            )
+            for d in plan.divergences
+        ],
+    )
+    return counts
+
+
+def _add_counts(base: dict, delta: dict) -> dict:
+    out = dict(base)
+    for k, v in delta.items():
+        out[k] = (out.get(k) or 0) + v
+    return dict(sorted(out.items()))
+
+
+def append_batch(
+    conn: sqlite3.Connection,
+    plans: list,
+    *,
+    offsets: dict[tuple[str, int], int],
+    seen: dict[str, list[tuple[str, int]]] | None = None,
+    sessions: dict[str, dict] | None = None,
+    stats: list[dict] | None = None,
+    at: str | None = None,
+) -> None:
+    """Пачка потребителя ОДНОЙ транзакцией (FR-012, FR-015, FR-016, research R7).
+
+    - `plans` — `stream.incremental.SessionPlan` по сеансам пачки (алерты, инциденты,
+      слияния, действия). Версии инцидентов и действий сверяются с планом: если аналитик
+      успел что-то решить, — `Conflict`, и потребитель пересчитает план (FR-020);
+    - `seen` — обработанные потоки (flow_uid, seq) по сеансам;
+    - `sessions` — по сеансам: `n_flows` (сколько новых потоков), `stream` (прибавки к
+      счётчикам раздела stream сводки), `stream_set` (значения, которые заменяются),
+      `summary` (прибавки к счётчикам сводки 004: alerts_by_expert, n_reversed),
+      `status`/`reason` (новый статус сеанса);
+    - `offsets` — позиции чтения (следующая позиция) по (топик, партиция);
+    - `stats` — строки показателей (R11).
+
+    Любая ошибка — ROLLBACK: ни алертов, ни позиции. Брокеру позиция подтверждается только
+    после успешного возврата отсюда.
+    """
+    at = at or now_iso()
+    sessions = sessions or {}
+    seen = seen or {}
+    with transaction(conn):
+        per_run: dict[str, dict[str, int]] = {}
+        for plan in plans:
+            per_run[plan.run_id] = _apply_plan(conn, plan, at)
+        for run_id, items in seen.items():
+            conn.executemany(
+                "INSERT OR IGNORE INTO stream_seen (run_id, flow_uid, seq) VALUES (?, ?, ?)",
+                [(run_id, uid, seq) for uid, seq in items],
+            )
+        for run_id in sorted({*per_run, *sessions, *seen}):
+            s = sessions.get(run_id, {})
+            row = conn.execute("SELECT summary FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise NotFound(f"сеанс {run_id} не найден")
+            summary = json.loads(row["summary"])
+            stream = _add_counts(summary.get("stream") or {}, s.get("stream", {}))
+            stream = _add_counts(stream, per_run.get(run_id, {}))
+            stream.update(s.get("stream_set", {}))
+            summary["stream"] = stream
+            for k, v in s.get("summary", {}).items():
+                if isinstance(v, dict):
+                    summary[k] = _add_counts(summary.get(k) or {}, v)
+                else:
+                    summary[k] = (summary.get(k) or 0) + v
+            conn.execute(
+                "UPDATE runs SET n_flows = n_flows + ?, "
+                "n_alerts = (SELECT COUNT(*) FROM alerts WHERE run_id = ?), "
+                "n_incidents = (SELECT COUNT(*) FROM incidents WHERE run_id = ? "
+                "AND merged_into IS NULL), summary = ?, last_activity_at = ?, finished_at = ? "
+                "WHERE run_id = ?",
+                (s.get("n_flows", 0), run_id, run_id, _json(summary), at, at, run_id),
+            )
+            if s.get("status"):
+                _set_status(conn, run_id, s["status"], s.get("reason", ""), at)
+        conn.executemany(
+            "INSERT INTO stream_offsets (topic, partition, next_offset, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT (topic, partition) DO UPDATE SET "
+            "next_offset = MAX(next_offset, excluded.next_offset), "
+            "updated_at = excluded.updated_at",
+            [(t, p, o, at) for (t, p), o in sorted(offsets.items())],
+        )
+        if stats:
+            write_stats(conn, stats, at=at)
+
+
+def _iso_at(ts: float) -> str:
+    return datetime.fromtimestamp(ts, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _ts(iso: str) -> float:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+
+
+def write_stats(conn: sqlite3.Connection, rows: list[dict], *, at: str | None = None) -> None:
+    """Показатели потока (R11). Это не аудит: строки старше суток удаляются."""
+    at = at or now_iso()
+    conn.executemany(
+        "INSERT INTO stream_stats (at, run_id, processed, lag_messages, lag_seconds, "
+        "latency_p50_ms, latency_p95_ms, rejected, late, rate_per_s) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                r.get("at", at),
+                r["run_id"],
+                r.get("processed", 0),
+                r.get("lag_messages"),
+                r.get("lag_seconds"),
+                r.get("latency_p50_ms"),
+                r.get("latency_p95_ms"),
+                r.get("rejected", 0),
+                r.get("late", 0),
+                r.get("rate_per_s"),
+            )
+            for r in rows
+        ],
+    )
+    cutoff = _iso_at(_ts(at) - STATS_KEEP_HOURS * 3600)
+    conn.execute("DELETE FROM stream_stats WHERE at < ?", (cutoff,))
+
+
+def latest_stats(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM stream_stats WHERE run_id = ? ORDER BY stat_id DESC LIMIT 1", (run_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_sessions(conn: sqlite3.Connection) -> list[dict]:
+    """Онлайн-сеансы, новые сверху."""
+    return [
+        _run_row(r)
+        for r in conn.execute(
+            "SELECT * FROM runs WHERE mode = 'stream' ORDER BY started_at DESC, run_id DESC"
+        )
+    ]
+
+
+def divergences(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    out = []
+    for r in conn.execute(
+        "SELECT * FROM stream_divergences WHERE run_id = ? ORDER BY divergence_id", (run_id,)
+    ):
+        d = dict(r)
+        d["details"] = json.loads(d["details"])
+        out.append(d)
+    return out
+
+
+# ---------------------------------------------------------------- аренда потребителя (FR-019)
+
+
+class LeaseHeld(StoreError):
+    """Аренду держит другой живой потребитель."""
+
+    code = "conflict"
+
+
+def acquire_lease(conn: sqlite3.Connection, holder: str, ttl_s: float, *, now: float) -> None:
+    """Взять аренду единственного потребителя (атомарно: BEGIN IMMEDIATE).
+
+    Живая чужая аренда (продлена меньше `ttl_s` назад) → `LeaseHeld` с тем, кто и с какого
+    времени держит. Истёкшая — забирается: прежний потребитель упал или завис.
+    """
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM stream_lease WHERE name = ?", (LEASE_NAME,)).fetchone()
+        if row is not None and row["holder"] != holder:
+            age = now - _ts(row["renewed_at"])
+            if age < ttl_s:
+                raise LeaseHeld(
+                    f"уже работает потребитель {row['holder']} с {row['acquired_at']} (аренда "
+                    f"продлена {age:.0f} с назад) — второй не запускаю (FR-019)"
+                )
+        at = _iso_at(now)
+        conn.execute(
+            "INSERT INTO stream_lease (name, holder, acquired_at, renewed_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (name) DO UPDATE SET holder = excluded.holder, "
+            "acquired_at = excluded.acquired_at, renewed_at = excluded.renewed_at",
+            (LEASE_NAME, holder, at, at),
+        )
+
+
+def renew_lease(conn: sqlite3.Connection, holder: str, *, now: float) -> bool:
+    """Продлить свою аренду. False — её уже забрал другой (эта истекла): надо остановиться."""
+    with transaction(conn):
+        cur = conn.execute(
+            "UPDATE stream_lease SET renewed_at = ? WHERE name = ? AND holder = ?",
+            (_iso_at(now), LEASE_NAME, holder),
+        )
+        return cur.rowcount == 1
+
+
+def release_lease(conn: sqlite3.Connection, holder: str) -> None:
+    with transaction(conn):
+        conn.execute("DELETE FROM stream_lease WHERE name = ? AND holder = ?", (LEASE_NAME, holder))
+
+
+def lease_info(conn: sqlite3.Connection, ttl_s: float, *, now: float) -> dict:
+    """Кто держит аренду и жива ли она — для `stream status` и панели."""
+    row = conn.execute("SELECT * FROM stream_lease WHERE name = ?", (LEASE_NAME,)).fetchone()
+    if row is None:
+        return {"alive": False, "holder": None, "renewed_at": None, "acquired_at": None}
+    return {
+        "alive": now - _ts(row["renewed_at"]) < ttl_s,
+        "holder": row["holder"],
+        "renewed_at": row["renewed_at"],
+        "acquired_at": row["acquired_at"],
+    }

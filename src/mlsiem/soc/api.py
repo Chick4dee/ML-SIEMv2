@@ -102,6 +102,10 @@ class IncidentItem(BaseModel):
     # фича 003 — только добавления: клиенты 002 эти поля просто не читают
     assignee: str | None = None
     flags: list[SourceFlag] = []
+    # фича 005: слияние и «новые алерты после решения» (у пакетных — null и 0)
+    merged_into: str | None = None
+    alerts_after_decision: int = 0
+    first_after_decision_ms: int | None = None
 
 
 class ExpertsCombination(BaseModel):
@@ -196,6 +200,11 @@ class Run(BaseModel):
     incidents_by_status: dict[str, int]
     # фича 004: модель прогона (у старых — детектор с версией из detector_version)
     model: dict[str, Any] | None = None
+    # фича 005: пакетный прогон или онлайн-сеанс (у пакетных — batch/completed/null)
+    mode: str = "batch"
+    status: str = "completed"
+    source_id: str | None = None
+    last_activity_at: str | None = None
 
 
 class RunList(BaseModel):
@@ -207,6 +216,41 @@ class Health(BaseModel):
     status: str
     detector_version: str | None
     db: str
+
+
+class StreamBroker(BaseModel):
+    reachable: bool | None
+    checked_at: str | None
+    error: str | None = None
+
+
+class StreamConsumer(BaseModel):
+    alive: bool
+    holder: str | None
+    renewed_at: str | None
+
+
+class StreamSession(BaseModel):
+    run_id: str
+    status: str
+    source_id: str | None
+    processed: int
+    lag_messages: int | None
+    lag_seconds: float | None
+    latency_p50_ms: float | None
+    latency_p95_ms: float | None
+    rejected: int
+    late: int
+    rate_per_s: float | None
+    last_activity_at: str | None
+
+
+class StreamStatus(BaseModel):
+    """Состояние потока (фича 005, contracts/api-ui-additions.md) — только чтение."""
+
+    broker: StreamBroker
+    consumer: StreamConsumer
+    sessions: list[StreamSession]
 
 
 class StatusChange(BaseModel):
@@ -261,12 +305,35 @@ def _csv(value: str | None, allowed: tuple[str, ...], name: str) -> list[str] | 
     return items
 
 
-def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) -> FastAPI:
+# Проверка брокера из API (фича 005): короткий тайм-аут и кеш — страница и API не должны
+# висеть на выключенной машине стенда
+BROKER_CHECK_TIMEOUT_S = 2
+BROKER_CHECK_CACHE_S = 10
+
+
+def _default_stream_cfg():
+    """configs/stream.yaml, если он есть и читается; иначе поток в API не настроен."""
+    from mlsiem.data.config import ConfigError
+    from mlsiem.stream.config import DEFAULT_STREAM_CONFIG, load_stream_config
+
+    try:
+        return load_stream_config(DEFAULT_STREAM_CONFIG)
+    except ConfigError:
+        return None
+
+
+def create_app(
+    cfg: SocConfig,
+    *,
+    detector_dir: Path = Path("models/detector"),
+    stream_cfg=None,
+) -> FastAPI:
     app = FastAPI(
         title="ML-SIEM v2 — API аналитика",
         version="1",
         description="Инциденты, предложения плейбуков (только симуляция) и аудит-журнал.",
     )
+    stream_cfg = stream_cfg if stream_cfg is not None else _default_stream_cfg()
     conn0 = store.connect(cfg.db)
     # Миграция схемы (если база от 002) — здесь, до первого запроса; флаг нужен CLI для
     # сообщения «схема базы обновлена»
@@ -336,6 +403,8 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
         assignee: str | None = None,
         action_state: str | None = None,
         flagged: Literal["only", "hide"] | None = None,
+        after_decision: Literal["only"] | None = None,
+        show_merged: bool = False,
         sort: Literal["severity", "first_seen", "last_seen", "n_alerts"] | None = None,
         dir: Literal["asc", "desc"] | None = None,
         limit: int = Query(50, ge=1, le=MAX_LIMIT),
@@ -352,6 +421,8 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
             "src_ip": src_ip,
             "assignee": assignee,
             "action_state": _csv(action_state, store.ACTION_STATES, "action_state"),
+            "after_decision": after_decision,
+            "show_merged": show_merged,
         }
         if flagged == "only":
             filters["incident_ids"] = flagged_ids(conn, run_id)
@@ -442,6 +513,40 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
         items = store.list_runs(conn)
         return {"total": len(items), "items": items}
 
+    broker_cache: dict[str, Any] = {"at": None, "state": None}
+
+    def broker_state() -> dict | None:
+        """Состояние брокера с тайм-аутом 2 с и кешем 10 с (FR-022)."""
+        import dataclasses
+        import time
+
+        from mlsiem.stream import broker as broker_mod
+        from mlsiem.stream.stats import check_broker_state
+
+        if stream_cfg is None:
+            return None
+        now = time.monotonic()
+        if broker_cache["at"] is not None and now - broker_cache["at"] < BROKER_CHECK_CACHE_S:
+            return broker_cache["state"]
+        quick = dataclasses.replace(
+            stream_cfg,
+            broker=dataclasses.replace(stream_cfg.broker, connect_timeout_s=BROKER_CHECK_TIMEOUT_S),
+        )
+        state = check_broker_state(quick, lambda: broker_mod.make_broker(quick, "api"))
+        broker_cache.update(at=now, state=state)
+        return state
+
+    @app.get(PREFIX + "/stream/status", response_model=StreamStatus)
+    def stream_status(conn=Depends(db)):
+        from mlsiem.stream.stats import status_report
+
+        if stream_cfg is None:
+            raise store.NotFound(
+                "поток не настроен: нет configs/stream.yaml (фича 005) — показателей нет"
+            )
+        state = broker_state()
+        return status_report(conn, stream_cfg, broker_state=state)
+
     @app.get(PREFIX + "/health", response_model=Health)
     def health():
         version = None
@@ -463,5 +568,5 @@ def create_app(cfg: SocConfig, *, detector_dir: Path = Path("models/detector")) 
     # внутри функции: ядро API ничего не знает о HTML, связь только здесь, в одну сторону
     from mlsiem.ui.routes import install
 
-    install(app, cfg, Path(detector_dir))
+    install(app, cfg, Path(detector_dir), stream_cfg=stream_cfg)
     return app

@@ -43,6 +43,11 @@ LABELS: dict[str, dict[str, str]] = {
         "incident_status_changed": "смена статуса",
         "run_loaded": "загружен прогон",
         "incident_assigned": "назначение ответственного",
+        # фича 005: поток дописывает, сливает, пересчитывает; сеанс меняет статус
+        "incident_updated": "инцидент дополнен потоком",
+        "incident_merged": "инцидент объединён",
+        "action_reproposed": "предложение пересчитано",
+        "session_status_changed": "смена статуса сеанса",
         # события хронологии карточки, которых нет в аудите
         "first_alert": "первый алерт",
         "last_alert": "последний алерт",
@@ -54,7 +59,15 @@ LABELS: dict[str, dict[str, str]] = {
         "infrastructure": "инфраструктура",
         "other": "другое",
     },
-    "field": {"status": "статус", "resolution": "резолюция", "assignee": "ответственный"},
+    "field": {
+        "status": "статус",
+        "resolution": "резолюция",
+        "assignee": "ответственный",
+        "severity": "серьёзность",
+    },
+    # фича 005: онлайн-сеанс (прогон с mode = stream) и его статус
+    "mode": {"batch": "пакетный прогон", "stream": "поток"},
+    "session_status": {"running": "идёт", "stopped": "остановлен", "completed": "завершён"},
     "clock": {"traffic": "время трафика", "decision": "время решения"},
     "flag": {"network": "сеть", "target_elsewhere": "цель в других инцидентах"},
     # фича 004: эксперты ансамбля (contracts/ui.md)

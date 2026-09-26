@@ -134,6 +134,27 @@ def load_pcap_flows(pcap: Path, run_dir: Path) -> tuple[pl.DataFrame, list[str]]
 # ---------------------------------------------------------------- прогон
 
 
+# Колонки алерта, которые пишутся в SQLite (store.write_run и потоковое дописывание 005)
+ALERT_ROW_COLUMNS = (
+    *ALERT_CONTEXT.values(),
+    "predicted_class",
+    "attack_score",
+    "incident_id",
+    "attacker_ip",
+    "victim_ip",
+    "reversed",
+    "fired_experts",
+    "experts",
+    EXPLANATION,
+)
+
+
+def alert_rows(alerts: pl.DataFrame) -> list[dict]:
+    """Алерты (с incident_id) → строки для хранилища. Общая для пакетного прогона и
+    потребителя 005: оба пишут алерты ровно теми же полями."""
+    return alerts.select(ALERT_ROW_COLUMNS).to_dicts()
+
+
 def alerts_by_expert(alerts: pl.DataFrame) -> dict[str, int]:
     """Алертов по экспертам: алерт, поднятый двумя экспертами, учитывается у обоих;
     `meta_only` — алерты, где не сработал ни один эксперт (их поднял мета-слой)."""
@@ -261,20 +282,6 @@ def run_chain(
 
         # 4. Запись одной транзакцией
         log.info("Запись прогона %s в %s…", run_id, cfg.db)
-        alert_rows = alerts.select(
-            [
-                *ALERT_CONTEXT.values(),
-                "predicted_class",
-                "attack_score",
-                "incident_id",
-                "attacker_ip",
-                "victim_ip",
-                "reversed",
-                "fired_experts",
-                "experts",
-                EXPLANATION,
-            ]
-        ).to_dicts()
         store.write_run(
             conn,
             {
@@ -308,7 +315,7 @@ def run_chain(
                 },
                 "warnings": warnings,
             },
-            alert_rows,
+            alert_rows(alerts),
             incident_rows,
             actions,
         )

@@ -190,7 +190,9 @@ def add_run(conn, run_id: str, *, started_at: str | None = None, summary: dict |
     """Пустой прогон прямо в SQLite (для модульных тестов без детектора)."""
     at = started_at or store.now_iso()
     conn.execute(
-        "INSERT INTO runs VALUES "
+        # Колонки перечислены явно: схема растёт от фичи к фиче (005 добавила режим сеанса)
+        'INSERT INTO runs (run_id, source, input_hash, detector_version, "limit", started_at, '
+        "finished_at, n_flows, n_alerts, n_incidents, summary, warnings) VALUES "
         "(?, 'split:test/test', 'h', 'det-1', NULL, ?, ?, 0, 0, 0, ?, '[]')",
         (run_id, at, at, json.dumps(summary or {})),
     )

@@ -44,6 +44,14 @@
     <label><input type="radio" name="flagged" value="hide"{% if view.flagged == 'hide' %} checked{% endif %}> скрыть подозрительные</label>
   </fieldset>
 
+  {% if stream_run %}
+  <fieldset>
+    <legend>Поток</legend>
+    <label><input type="checkbox" name="after_decision" value="only"{% if view.after_decision %} checked{% endif %}> только с новыми алертами после решения</label>
+    <label><input type="checkbox" name="show_merged" value="1"{% if view.show_merged %} checked{% endif %}> показать объединённые</label>
+  </fieldset>
+  {% endif %}
+
   <div class="filter-fields">
     <label>Класс атаки
       <select name="attack_class">

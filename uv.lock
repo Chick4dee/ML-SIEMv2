@@ -388,6 +388,19 @@ wheels = [
 ]
 
 [[package]]
+name = "confluent-kafka"
+version = "2.15.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/fd/e8204b211ce0f32d4d03f9c3423b1244c2dc7fae45babbf98979c00a9e11/confluent_kafka-2.15.1.tar.gz", hash = "sha256:99d1223020e27854e75981333983c5120d64762268f8afcc805fbd62e7de49aa", size = 325065, upload-time = "2026-09-10T15:27:59.367Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6d/19/b74eab7df53c28dda7440abe3d9e2898b806cd14055fceae68cbb9d1808f/confluent_kafka-2.15.1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:19e94f063c1d2f6a46ee56b4a33a2990bbaa879c66622c4a872e7832b26339ca", size = 4375956, upload-time = "2026-09-10T15:27:10.933Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/1c/ca5f19b968d115ac082a3ddd2ac1fdc5219a4789c337074404e82b53afc6/confluent_kafka-2.15.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:84fd9868b825ceec3b027dabc9e40e62951eab20dc72a6b53fbfca0a584df074", size = 4346051, upload-time = "2026-09-10T15:27:12.432Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/d5/b01aad0c4938822b5697648e0ae5ab87729138a59fdc078b00a983aac90c/confluent_kafka-2.15.1-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:3a6a11c4d19eecdf51990adfa9e05e238f500b9888253230b158370c482a60cc", size = 4989151, upload-time = "2026-09-10T15:27:13.823Z" },
+    { url = "https://files.pythonhosted.org/packages/22/43/de7ba18948792e128a86236ed5c5d6e4bab6c5bfc2be1b003880afa6dcbb/confluent_kafka-2.15.1-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:44b849e0b375ff4c7a2e5e7af27a48d808933b53f3a8bf8e84b5c81eef9463ec", size = 4801449, upload-time = "2026-09-10T15:27:15.443Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/ca/0eb8d48ecf3b241a62fba10a3ad83a95248ba53058b272a63a5be75e9c23/confluent_kafka-2.15.1-cp311-cp311-win_amd64.whl", hash = "sha256:80251e20c52e469b9bb066eca9b885d787b4be13356950a880198889cd215bfc", size = 4564958, upload-time = "2026-09-10T15:27:17.069Z" },
+]
+
+[[package]]
 name = "contourpy"
 version = "1.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1350,6 +1363,7 @@ name = "mlsiem"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "confluent-kafka" },
     { name = "dvc" },
     { name = "fastapi" },
     { name = "jinja2" },
@@ -1358,6 +1372,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "mlflow" },
     { name = "nfstream" },
+    { name = "orjson" },
     { name = "polars" },
     { name = "psutil" },
     { name = "pyarrow" },
@@ -1375,10 +1390,14 @@ dev = [
     { name = "ruff" },
     { name = "scapy" },
 ]
+stand = [
+    { name = "pycdlib" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", marker = "extra == 'dev'" },
+    { name = "confluent-kafka" },
     { name = "dvc", specifier = ">=3,<4" },
     { name = "fastapi" },
     { name = "httpx", marker = "extra == 'dev'" },
@@ -1388,9 +1407,11 @@ requires-dist = [
     { name = "matplotlib" },
     { name = "mlflow" },
     { name = "nfstream", specifier = "==6.6.*" },
+    { name = "orjson" },
     { name = "polars" },
     { name = "psutil" },
     { name = "pyarrow" },
+    { name = "pycdlib", marker = "extra == 'stand'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "python-multipart" },
     { name = "pyyaml" },
@@ -1399,7 +1420,7 @@ requires-dist = [
     { name = "scikit-learn" },
     { name = "uvicorn" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "stand"]
 
 [[package]]
 name = "multidict"
@@ -1800,6 +1821,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e9/e6/78ebbb10a8c8e4b61a59249394a4a594c1a7af95593dc933a349c8d00964/pyasn1_modules-0.4.2.tar.gz", hash = "sha256:677091de870a80aae844b1ca6134f54652fa2c8c5a52aa396440ac3106e941e6", size = 307892, upload-time = "2025-03-28T02:41:22.17Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl", hash = "sha256:29253a9207ce32b64c3ac6600edc75368f98473906e8fd1043bd6b5b1de2c14a", size = 181259, upload-time = "2025-03-28T02:41:19.028Z" },
+]
+
+[[package]]
+name = "pycdlib"
+version = "1.20.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/01/7fdd73e832b95a1b32e137be2fbeed05abef3aec527bcfebca4c313969a6/pycdlib-1.20.0.tar.gz", hash = "sha256:1d768eb491d761a3bace188270f152ef40f33fb0d3daf6cf39bc38a81272072c", size = 328278, upload-time = "2026-08-05T13:59:47.58Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/2e/624824081e1ceb69bcd2c3b2358d01e8ba7e7c84a0f019bf24e1e822ec01/pycdlib-1.20.0-py2.py3-none-any.whl", hash = "sha256:cb675959dd6d61e94f02560ed7e9a5d368a3188b5f7f31813bc25a750cff0863", size = 228561, upload-time = "2026-08-05T13:59:45.007Z" },
 ]
 
 [[package]]

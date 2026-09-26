@@ -70,6 +70,10 @@ RUN_KEYS_002 = {
     "warnings",
     "incidents_by_status",
 }
+# Фича 005 (contracts/api-ui-additions.md) добавила к тем же ответам поля сеанса и потока;
+# у пакетных прогонов они со значениями по умолчанию (batch/completed/null/0)
+RUN_KEYS_005 = {"mode", "status", "source_id", "last_activity_at"}
+CARD_KEYS_005 = {"merged_into", "alerts_after_decision", "first_after_decision_ms"}
 
 
 def _old_run(cfg) -> str:
@@ -160,7 +164,7 @@ def test_experts_summary(ens_client):
     client, s = ens_client
     inc = _first_incident(client, s.run_id)
     card = client.get(f"{API}/incidents/{inc['incident_id']}").json()
-    assert CARD_KEYS_003 | {"experts_summary"} == set(card)
+    assert CARD_KEYS_003 | {"experts_summary"} | CARD_KEYS_005 == set(card)
     es = card["experts_summary"]
     assert es["available"] is True
     assert set(es["by_expert"]) <= {"classifier", "anomaly"}
@@ -175,7 +179,7 @@ def test_runs_model(ens_client):
     client, s = ens_client
     runs = {r["run_id"]: r for r in client.get(f"{API}/runs").json()["items"]}
     for r in runs.values():
-        assert RUN_KEYS_002 | {"model"} == set(r)
+        assert RUN_KEYS_002 | {"model"} | RUN_KEYS_005 == set(r)
     new = runs[s.run_id]["model"]
     assert new["kind"] == "ensemble" and new["selected"] == "ensemble:stack_logreg"
     assert set(new["experts"]) == {"classifier", "anomaly"}

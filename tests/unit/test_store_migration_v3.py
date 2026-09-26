@@ -66,27 +66,41 @@ def _v2_db(path) -> sqlite3.Connection:
     return conn
 
 
-def _rows(conn, table, order):
-    return [tuple(r) for r in conn.execute(f"SELECT * FROM {table} ORDER BY {order}")]
+def _rows(conn, table, order, cols=None):
+    what = ", ".join(f'"{c}"' for c in cols) if cols else "*"
+    return [tuple(r) for r in conn.execute(f"SELECT {what} FROM {table} ORDER BY {order}")]
 
 
-def _snapshot(conn):
+SNAPSHOT_TABLES = {
+    "incidents": "incident_id",
+    "actions": "action_id",
+    "incident_history": "history_id",
+    "audit_log": "entry_id",
+    "runs": "run_id",
+}
+
+
+def _columns(conn):
     return {
-        "incidents": _rows(conn, "incidents", "incident_id"),
-        "actions": _rows(conn, "actions", "action_id"),
-        "incident_history": _rows(conn, "incident_history", "history_id"),
-        "audit_log": _rows(conn, "audit_log", "entry_id"),
-        "runs": _rows(conn, "runs", "run_id"),
+        t: [r["name"] for r in conn.execute(f"PRAGMA table_info({t})")] for t in SNAPSHOT_TABLES
     }
+
+
+def _snapshot(conn, cols=None):
+    """Строки таблиц; `cols` — только эти колонки (схема 4 фичи 005 добавляет свои колонки
+    к runs и incidents — сравниваем то, что было в схеме 2, байт в байт)."""
+    cols = cols or {}
+    return {t: _rows(conn, t, order, cols.get(t)) for t, order in SNAPSHOT_TABLES.items()}
 
 
 def test_migrate_v2_to_v3(tmp_path):
     conn = _v2_db(tmp_path / "soc.db")
     before = _snapshot(conn)
+    cols_v2 = _columns(conn)
     n_alerts = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
 
     assert store.init_db(conn) is True
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
     cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(alerts)")}
     for c in NEW_ALERT_COLUMNS:
         assert c in cols
@@ -99,7 +113,7 @@ def test_migrate_v2_to_v3(tmp_path):
         assert r["reversed"] == 0
         assert r["experts"] is None and r["fired_experts"] is None and r["explanation"] is None
     # Всё, кроме алертов, — байт в байт как было (включая entry_id аудита)
-    assert _snapshot(conn) == before
+    assert _snapshot(conn, cols_v2) == before
     idx = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert "ix_alerts_incident_experts" in idx
 
@@ -129,7 +143,7 @@ def test_chain_from_002(tmp_path):
     store.append_audit(conn, "system", "run_loaded", run_id="r1", at="2026-01-01T00:00:00.000Z")
     audit = _rows(conn, "audit_log", "entry_id")
     assert store.init_db(conn) is True
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
     assert _rows(conn, "audit_log", "entry_id") == audit
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(alerts)")]
     assert set(NEW_ALERT_COLUMNS) <= set(cols)
@@ -139,7 +153,7 @@ def test_chain_from_002(tmp_path):
 def test_newer_refused(tmp_path):
     conn = store.connect(tmp_path / "future.db")
     store.init_db(conn)
-    conn.execute("PRAGMA user_version = 4")
+    conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 1}")
     with pytest.raises(store.SchemaTooNew):
         store.init_db(conn)
 

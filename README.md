@@ -110,3 +110,36 @@ uv run mlsiem soc review-sources --run ID --after ID    # разбор инци�
 Конфиг эксперимента — `configs/ensemble.yaml`. Сценарии проверки —
 `specs/004-detection-experts-ensemble/quickstart.md`.
 
+
+## Потоковая обработка через Kafka (фича 005)
+
+Цепочка 002–004 стала потоковой: потоки идут сообщениями через Apache Kafka (KRaft, один
+узел) на Linux-машине Hyper-V `mlsiem-broker` в служебной сети `mlsiem-mgmt`; потребитель на
+хосте считает вердикты той же моделью, группирует **инкрементально** (со слиянием, результат
+совпадает с пакетным `soc run`) и пишет пачку одной транзакцией SQLite — позиция брокеру
+подтверждается только после записи. Docker и WSL2 не нужны.
+
+```
+uv run mlsiem stand seed-iso                              # seed-ISO автоустановки (только файл)
+uv run mlsiem stand check                                 # брокер, топики, изоляция сети стенда
+uv run mlsiem stream consume [--model DIR] [--once]       # онлайн-цепочка (Ctrl+C — доделать пачку)
+uv run mlsiem stream replay --split unsw_time --part test --speed 60   # или --speed max, --pcap F
+uv run mlsiem stream status                               # скорость, отставание, задержка p50/p95
+uv run mlsiem stream compare --session ID --batch ID      # эквивалентность с пакетным прогоном
+uv run mlsiem stream close --session ID                   # завершить сеанс без отметки end
+```
+
+- Стенд поднимают скрипты `stand/hyperv/*.ps1` (от администратора; каждый меняющий шаг —
+  с подтверждением, `-WhatIf` — только план) — пошагово в `stand/hyperv/README.md`.
+  Шаблоны автоустановки Ubuntu 24.04 и Kafka — `stand/broker/`.
+- Все параметры — `configs/stream.yaml` (адрес брокера, топики, пачки, допустимое опоздание,
+  аренда, ресурсы машины, версия и SHA-512 Kafka).
+- Сеанс — прогон с режимом «поток» и статусом «идёт / остановлен / завершён»; вердикты —
+  `var/runs/<сеанс>/verdicts/part-*.parquet`. База мигрирует до схемы 4 сама (сделайте копию
+  `var/soc.db` перед первым запуском).
+- В консоли: значок «поток» у сеанса, блок «Поток» на панели, пометки «новые алерты после
+  решения» и «объединён с …», фильтры по ним; `GET /api/v1/stream/status`.
+- Быстрые тесты идут на брокере-заглушке в памяти; тесты на настоящем брокере —
+  `uv run pytest -m stand` (после подъёма стенда).
+
+Сценарии проверки — `specs/005-kafka-streaming-chain/quickstart.md`.

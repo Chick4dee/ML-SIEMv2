@@ -1,4 +1,5 @@
-"""Точка входа `mlsiem`. Группы: `data` (фича 001), `detect` и `soc` (фича 002).
+"""Точка входа `mlsiem`. Группы: `data` (фича 001), `detect` и `soc` (фича 002),
+`stand` и `stream` (фича 005: брокерная машина и потоковая обработка через Kafka).
 
 Договорённости (contracts/cli.md):
 - прогресс и предупреждения — в stderr, итоговая сводка — в stdout;
@@ -471,6 +472,10 @@ def cmd_soc_status(args, cfg) -> int:
             if m["kind"] == "ensemble"
             else f"детектор {m['version']}"
         )
+        # Фича 005: у онлайн-сеанса — режим и статус; строки пакетных прогонов прежние
+        if r.get("mode") == "stream":
+            titles = {"running": "идёт", "stopped": "остановлен", "completed": "завершён"}
+            model += f"  поток, {titles.get(r['status'], r['status'])}"
         _out(
             f"  {r['run_id']}  {r['source']:<24} {r['started_at']}  "
             f"{model}  "
@@ -478,6 +483,309 @@ def cmd_soc_status(args, cfg) -> int:
             f"closed {st['closed']})"
         )
     return EXIT_OK
+
+
+# ---------------------------------------------------------------- фича 005: stand и stream
+
+
+def cmd_stand_seed_iso(args, cfg) -> int:
+    """Seed-ISO автоустановки брокерной машины — только файл, система не меняется."""
+    from mlsiem.stand.seed import DEFAULT_PUBKEY, build_seed_iso, read_pubkey
+
+    key = read_pubkey(Path(args.pubkey) if args.pubkey else DEFAULT_PUBKEY)
+    out = build_seed_iso(cfg, key, Path(args.out))
+    size_kb = out.stat().st_size / 1024
+    _out(f"Seed-ISO: {out} ({size_kb:.0f} КБ, метка тома CIDATA)")
+    _out(
+        f"  машина {cfg.stand.vm_name}: адрес {cfg.stand.broker_ip}/{cfg.stand.prefix}, "
+        f"Kafka {cfg.stand.kafka_version}, пользователь {cfg.stand.admin_user} (вход по ключу)"
+    )
+    _out("Дальше: stand/hyperv/20-vm-broker.ps1 -Iso <образ Ubuntu> (от администратора)")
+    return EXIT_OK
+
+
+def cmd_stand_check(args, cfg) -> int:
+    from mlsiem.stand.check import stand_check
+    from mlsiem.stream import broker as broker_mod
+
+    report = stand_check(cfg, lambda: broker_mod.make_broker(cfg, "check"))
+    for line in report.lines:
+        _out(line)
+    for w in report.warnings:
+        _out(f"Предупреждение: {w}")
+    if report.ok:
+        _out("Стенд в порядке: брокер доступен из служебной сети, топики на месте.")
+        return EXIT_OK
+    _out("Проблемы:")
+    for p in report.problems:
+        _out(f"  - {p}")
+    return EXIT_ERROR
+
+
+def cmd_stream_replay(args, cfg) -> int:
+    import tempfile
+
+    from mlsiem.stream import broker as broker_mod
+    from mlsiem.stream.config import parse_speed
+    from mlsiem.stream.replay import (
+        ReplayError,
+        find_resume,
+        load_pcap_source,
+        load_split_source,
+        new_source_id,
+        replay,
+    )
+
+    if args.pcap and (args.split or args.part):
+        log.error("укажите либо --pcap, либо --split/--part, но не всё сразу")
+        return EXIT_ERROR
+    if not args.pcap and not (args.split and args.part):
+        log.error("нужен вход: --split <имя> --part <часть> или --pcap <файл>")
+        return EXIT_ERROR
+    if args.limit is not None and args.limit <= 0:
+        log.error("--limit должен быть положительным числом")
+        return EXIT_ERROR
+    speed = parse_speed(args.speed, "--speed") if args.speed else cfg.replay.default_speed
+
+    with tempfile.TemporaryDirectory(prefix="mlsiem-replay-") as tmp:
+        try:
+            if args.pcap:
+                log.info("Извлекаю потоки из %s экстрактором 001…", Path(args.pcap).name)
+                source = load_pcap_source(Path(args.pcap), Path(tmp))
+                if args.limit:
+                    source.flows = source.flows.head(args.limit)
+            else:
+                source = load_split_source(
+                    args.split, args.part, data_dir=Path(args.data_dir), limit=args.limit
+                )
+        except ReplayError as exc:
+            log.error("Ошибка: %s", exc)
+            return EXIT_ERROR
+        for w in source.warnings:
+            log.warning("Предупреждение: %s", w)
+
+        broker = broker_mod.make_broker(cfg, "replay")
+        try:
+            broker.ping()
+            if cfg.topics.flows not in broker.list_topics():
+                log.error(
+                    "На брокере нет топика %s — проверьте стенд: uv run mlsiem stand check",
+                    cfg.topics.flows,
+                )
+                return EXIT_ERROR
+            first_seq = 0
+            if args.resume:
+                source_id = args.resume
+                first_seq, ended = find_resume(broker, cfg.topics.flows, source_id)
+                if ended:
+                    _out(f"Источник {source_id} уже отправлен целиком (есть отметка end)")
+                    return EXIT_OK
+                log.info("Продолжаю %s с потока seq=%d из %d", source_id, first_seq, source.total)
+            else:
+                source_id = new_source_id(source.label)
+            tempo = "max (без пауз)" if speed is None else f"×{speed:g}"
+            log.info("Проигрываю %s: %d потоков, темп %s", source.label, source.total, tempo)
+
+            def progress(sent, total, rate, behind):
+                log.info(
+                    "  отправлено %d из %d, %.0f потоков/с, отставание от графика %.1f с",
+                    sent,
+                    total,
+                    rate,
+                    behind,
+                )
+
+            summary = replay(
+                source,
+                broker,
+                cfg.topics.flows,
+                source_id=source_id,
+                speed=speed,
+                first_seq=first_seq,
+                on_progress=progress,
+                progress_interval_s=cfg.replay.progress_interval_s,
+            )
+        except broker_mod.BrokerUnavailable as exc:
+            log.error("Ошибка: %s", exc)
+            return EXIT_ERROR
+        except ReplayError as exc:
+            log.error("Ошибка: %s", exc)
+            return EXIT_ERROR
+        finally:
+            broker.close()
+    _out(f"source_id: {summary.source_id}")
+    _out(
+        f"  отправлено {summary.sent} из {summary.total} потоков (+ отметка end) "
+        f"за {summary.seconds:.1f} с, {summary.rate:.0f} потоков/с"
+    )
+    return EXIT_OK
+
+
+def _load_soc_for_stream(args):
+    from mlsiem.soc.config import load_soc_config
+
+    return load_soc_config(args.soc_config)
+
+
+def cmd_stream_consume(args, cfg) -> int:
+    import signal
+
+    from mlsiem.detect.artifact import DetectorLoadError
+    from mlsiem.soc import store
+    from mlsiem.stream import broker as broker_mod
+    from mlsiem.stream.consumer import ConsumerStopped, consume
+
+    soc = _load_soc_for_stream(args)
+    stopping = {"flag": False}
+
+    def on_sigint(signum, frame):
+        # Первый Ctrl+C — доделать текущую пачку, записать, подтвердить и выйти; второй —
+        # прервать сразу (незаписанная пачка просто прочитается снова при следующем запуске)
+        if stopping["flag"]:
+            raise KeyboardInterrupt
+        stopping["flag"] = True
+        log.info("Останавливаюсь: доделываю текущую пачку… (ещё раз Ctrl+C — прервать сразу)")
+
+    previous = signal.signal(signal.SIGINT, on_sigint)
+    broker = broker_mod.make_broker(cfg, "consumer")
+    try:
+        log.info("Потребитель: брокер %s, база %s", cfg.broker.bootstrap, soc.db)
+        summary = consume(
+            cfg,
+            soc,
+            broker=broker,
+            model_dir=_model_dir(args),
+            once=args.once,
+            stop=lambda: stopping["flag"],
+            on_report=log.info,
+        )
+    except store.LeaseHeld as exc:
+        log.error("Ошибка: %s", exc.message)
+        return EXIT_ERROR
+    except (ConsumerStopped, broker_mod.BrokerUnavailable, DetectorLoadError) as exc:
+        log.error("Ошибка: %s", exc)
+        return EXIT_ERROR
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        broker.close()
+    _out(
+        f"Потребитель остановлен: пачек {summary.batches}, сообщений {summary.messages}, "
+        f"обработано потоков {summary.processed}, повторов отброшено {summary.duplicates}, "
+        f"отвергнуто {summary.rejected}"
+    )
+    for st in summary.sessions.values():
+        _out(
+            f"  {st.run_id} ({st.source_id}): потоков {st.processed}, алертов {st.alerts}, "
+            f"отвергнуто {st.rejected}"
+        )
+    return EXIT_OK
+
+
+def cmd_stream_status(args, cfg) -> int:
+    from mlsiem.soc import store
+    from mlsiem.stream import broker as broker_mod
+    from mlsiem.stream.stats import status_report
+
+    soc = _load_soc_for_stream(args)
+    conn = store.connect(soc.db)
+    try:
+        store.init_db(conn)
+        rep = status_report(conn, cfg, broker_factory=lambda: broker_mod.make_broker(cfg, "status"))
+    finally:
+        conn.close()
+    b, c = rep["broker"], rep["consumer"]
+    if b["reachable"]:
+        lag = rep["lag_messages"]
+        _out(f"Брокер {cfg.broker.bootstrap}: доступен; непрочитанных сообщений {lag}")
+    else:
+        _out(f"Брокер {cfg.broker.bootstrap}: НЕДОСТУПЕН — {b['error']}")
+    if c["alive"]:
+        _out(f"Потребитель: работает ({c['holder']}, аренда продлена {c['renewed_at']})")
+    else:
+        _out("Потребитель: не работает" + (f" (последний — {c['holder']})" if c["holder"] else ""))
+    if not rep["sessions"]:
+        _out("Сеансов ещё не было (`mlsiem stream consume`)")
+    titles = {"running": "идёт", "stopped": "остановлен", "completed": "завершён"}
+    for s in rep["sessions"]:
+
+        def f(x, fmt="{:.0f}"):
+            return "—" if x is None else fmt.format(x)
+
+        _out(
+            f"  {s['run_id']}  {titles.get(s['status'], s['status']):<10} {s['source_id']}\n"
+            f"    обработано {s['processed']}, алертов {s['n_alerts']}, инцидентов "
+            f"{s['n_incidents']}; {f(s['rate_per_s'])} потоков/с; отставание "
+            f"{f(s['lag_messages'])} сообщ. / {f(s['lag_seconds'], '{:.1f}')} с; задержка p50 "
+            f"{f(s['latency_p50_ms'])} мс, p95 {f(s['latency_p95_ms'])} мс; отвергнуто "
+            f"{s['rejected']}, опоздавших {s['late']}; последняя активность "
+            f"{s['last_activity_at']}"
+        )
+    return EXIT_OK
+
+
+def cmd_stream_close(args, cfg) -> int:
+    from mlsiem.soc import store
+
+    soc = _load_soc_for_stream(args)
+    conn = store.connect(soc.db)
+    try:
+        store.init_db(conn)
+        try:
+            run = store.get_run(conn, args.session)
+        except store.NotFound as exc:
+            log.error("Ошибка: %s", exc.message)
+            return EXIT_ERROR
+        if run["mode"] != "stream":
+            log.error("Ошибка: %s — пакетный прогон, закрывать нечего", args.session)
+            return EXIT_ERROR
+        if run["status"] == "completed":
+            _out(f"Сеанс {args.session} уже завершён")
+            return EXIT_OK
+        store.set_session_status(
+            conn, args.session, "completed", "закрыт командой mlsiem stream close"
+        )
+    finally:
+        conn.close()
+    _out(f"Сеанс {args.session}: {run['status']} → completed (записано в аудит)")
+    return EXIT_OK
+
+
+def cmd_stream_compare(args, cfg) -> int:
+    from mlsiem.soc import store
+    from mlsiem.stream.compare import CompareError, compare, write_compare
+
+    soc = _load_soc_for_stream(args)
+    conn = store.connect(soc.db)
+    try:
+        store.init_db(conn)
+        try:
+            report = compare(conn, soc.runs_dir, args.session, args.batch)
+        except CompareError as exc:
+            log.error("Ошибка: %s", exc)
+            return EXIT_ERROR
+    finally:
+        conn.close()
+    md, js = write_compare(report, Path(args.reports_dir))
+    if report["equivalent"]:
+        extra = report["divergences_by_reason"]
+        note = f" (известные расхождения: {extra})" if extra else ""
+        _out(f"Сеанс {args.session} и прогон {args.batch}: эквивалентно{note}")
+    else:
+        by = ", ".join(f"{k} — {n}" for k, n in report["divergences_by_reason"].items())
+        _out(f"Сеанс {args.session} и прогон {args.batch}: расхождения по видам: {by}")
+    v, i = report["verdicts"], report["incidents"]
+    _out(
+        f"  вердикты: совпало {v['matched']} из {v['both']}; инциденты: совпало {i['matched']} "
+        f"(в сеансе {i['session']}, в пакетном {i['batch']})"
+    )
+    _out(f"Отчёт: {md}; данные: {js}")
+    return EXIT_OK
+
+
+def _load_stream_config(args):
+    from mlsiem.stream.config import load_stream_config
+
+    return load_stream_config(args.config)
 
 
 # ---------------------------------------------------------------- разбор аргументов
@@ -618,6 +926,55 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reports-dir", default="reports", help="куда писать отчёт разбора")
     p.add_argument("--data-dir", default="data", help="где лежат потоки и разбиения 001")
     p.set_defaults(func=cmd_soc_review)
+
+    # ---- фича 005
+    stand = groups.add_parser("stand", help="брокерная машина стенда: seed-ISO и проверка (005)")
+    stand.add_argument("--config", default="configs/stream.yaml", help="конфиг потока и стенда")
+    stand.set_defaults(load_config=_load_stream_config)
+    sub = stand.add_subparsers(dest="command", required=True)
+    p = sub.add_parser(
+        "seed-iso", help="собрать seed-ISO автоустановки Ubuntu с Kafka (только файл)"
+    )
+    p.add_argument("--out", default="var/stand/seed.iso", help="куда записать образ")
+    p.add_argument("--pubkey", help="открытый SSH-ключ хоста (по умолчанию ~/.ssh/id_ed25519.pub)")
+    p.set_defaults(func=cmd_stand_seed_iso)
+    p = sub.add_parser("check", help="проверить с хоста брокер, топики и изоляцию сети стенда")
+    p.set_defaults(func=cmd_stand_check)
+
+    stream = groups.add_parser("stream", help="потоковая обработка через Kafka (фича 005)")
+    stream.add_argument("--config", default="configs/stream.yaml", help="конфиг потока")
+    stream.add_argument(
+        "--soc-config", default="configs/soc.yaml", help="конфиг SOC (база, окно, плейбуки)"
+    )
+    stream.set_defaults(load_config=_load_stream_config)
+    sub = stream.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("replay", help="проиграть часть разбиения 001 или PCAP в брокер")
+    p.add_argument("--split", help="имя разбиения 001, например unsw_time")
+    p.add_argument("--part", choices=["train", "val", "test"], help="часть разбиения")
+    p.add_argument("--pcap", help="PCAP вместо разбиения (потоки — экстрактором 001)")
+    p.add_argument("--limit", type=int, help="только первые N потоков по времени")
+    p.add_argument(
+        "--speed",
+        help="«реальное время × N» (например 60) или max — без пауз; по умолчанию из "
+        "конфига (replay.default_speed)",
+    )
+    p.add_argument("--resume", metavar="SOURCE_ID", help="продолжить прерванное проигрывание")
+    p.add_argument("--data-dir", default="data", help="где лежат потоки и разбиения 001")
+    p.set_defaults(func=cmd_stream_replay)
+    p = sub.add_parser("consume", help="онлайн-цепочка: сообщения → инциденты в SQLite")
+    _model_args(p)
+    p.add_argument("--once", action="store_true", help="обработать всё доступное и выйти")
+    p.set_defaults(func=cmd_stream_consume)
+    p = sub.add_parser("status", help="показатели потока: брокер, потребитель, сеансы")
+    p.set_defaults(func=cmd_stream_status)
+    p = sub.add_parser("close", help="завершить сеанс без отметки end (живой источник)")
+    p.add_argument("--session", required=True, help="run_id сеанса (stream-…)")
+    p.set_defaults(func=cmd_stream_close)
+    p = sub.add_parser("compare", help="сравнить онлайн-сеанс с пакетным прогоном того же входа")
+    p.add_argument("--session", required=True, help="run_id сеанса (stream-…)")
+    p.add_argument("--batch", required=True, help="run_id пакетного прогона (`soc run`)")
+    p.add_argument("--reports-dir", default="reports", help="куда писать отчёт сравнения")
+    p.set_defaults(func=cmd_stream_compare)
     return parser
 
 

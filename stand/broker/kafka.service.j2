@@ -1,0 +1,19 @@
+[Unit]
+Description=Apache Kafka {{ s.kafka_version }} (KRaft, стенд mlsiem, фича 005)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kafka
+Group=kafka
+# Куча JVM из configs/stream.yaml (stand.kafka_heap_mb): машине {{ s.memory_mb }} МБ, ОС нужен запас
+Environment="KAFKA_HEAP_OPTS=-Xms{{ s.kafka_heap_mb }}m -Xmx{{ s.kafka_heap_mb }}m"
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /etc/mlsiem/server.properties
+ExecStop=/opt/kafka/bin/kafka-server-stop.sh
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=100000
+
+[Install]
+WantedBy=multi-user.target

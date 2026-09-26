@@ -38,3 +38,8 @@ mlflow.db
 /models/*
 !/models/.gitignore
 !/models/*.dvc
+
+# Фича 005: seed-ISO и образы брокерной машины (var/ уже игнорируется — строка для ясности).
+# Скрипты и шаблоны стенда (stand/) лежат в git
+/var/stand/
+*.iso

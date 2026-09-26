@@ -1,0 +1,65 @@
+#!/bin/bash
+# Установка Kafka {{ s.kafka_version }} на брокерной машине — запускается cloud-init на первой загрузке.
+# Собран из stand/broker/install-kafka.sh.j2 и configs/stream.yaml (`mlsiem stand seed-iso`).
+# Идемпотентен: повторный запуск ничего не ломает (архив сверяется, каталоги и топики — «если нет»).
+set -euo pipefail
+exec > >(tee -a /var/log/mlsiem-install-kafka.log) 2>&1
+
+VERSION="{{ s.kafka_version }}"
+ARCHIVE="kafka_2.13-${VERSION}.tgz"
+SHA512="{{ s.kafka_sha512 }}"
+CLUSTER_ID="{{ s.cluster_id }}"
+BROKER="{{ s.broker_ip }}:9092"
+
+echo "== mlsiem: установка Kafka ${VERSION} =="
+
+# 1. Архив с официального зеркала Apache; если выпуск уже ушёл в архив — оттуда же, из archive
+cd /tmp
+if [ ! -f "${ARCHIVE}" ]; then
+  curl -fsSLO "https://downloads.apache.org/kafka/${VERSION}/${ARCHIVE}" \
+    || curl -fsSLO "https://archive.apache.org/dist/kafka/${VERSION}/${ARCHIVE}"
+fi
+# Проверка SHA-512 — без неё архив не распаковывается (подмена или обрыв закачки)
+echo "${SHA512}  ${ARCHIVE}" | sha512sum -c -
+
+# 2. Отдельный пользователь без входа и данные в /var/lib/kafka
+id kafka >/dev/null 2>&1 || useradd --system --home-dir /opt/kafka --shell /usr/sbin/nologin kafka
+if [ ! -d "/opt/kafka_2.13-${VERSION}" ]; then
+  tar -xzf "${ARCHIVE}" -C /opt
+fi
+ln -sfn "/opt/kafka_2.13-${VERSION}" /opt/kafka
+chown -R kafka:kafka "/opt/kafka_2.13-${VERSION}"
+install -d -o kafka -g kafka -m 0750 /var/lib/kafka
+
+# 3. Хранилище KRaft с фиксированным cluster id (пересоздание машины даёт тот же кластер)
+if [ ! -f /var/lib/kafka/meta.properties ]; then
+  sudo -u kafka /opt/kafka/bin/kafka-storage.sh format -t "${CLUSTER_ID}" \
+    -c /etc/mlsiem/server.properties --ignore-formatted
+fi
+
+# 4. Брандмауэр — второй слой после изоляции сетей (research R2): Kafka только из служебной
+#    сети, SSH только с хоста
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow from {{ s.network }} to any port 9092 proto tcp
+ufw allow from {{ s.host_ip }} to any port 22 proto tcp
+ufw --force enable
+
+# 5. Служба
+systemctl daemon-reload
+systemctl enable --now kafka.service
+
+# 6. Ждём порт и создаём топики (auto.create.topics.enable=false — только здесь)
+for _ in $(seq 1 60); do
+  if /opt/kafka/bin/kafka-topics.sh --bootstrap-server "${BROKER}" --list >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+{% for topic in topics %}
+/opt/kafka/bin/kafka-topics.sh --bootstrap-server "${BROKER}" --create --if-not-exists \
+  --topic {{ topic.name }} --partitions {{ topic.partitions }} --replication-factor 1 \
+  --config retention.ms={{ topic.retention_ms }}
+{% endfor %}
+/opt/kafka/bin/kafka-topics.sh --bootstrap-server "${BROKER}" --describe
+echo "== mlsiem: Kafka ${VERSION} готова =="

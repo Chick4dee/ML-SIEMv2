@@ -37,6 +37,8 @@ LIST_PARAMS = (
     "assignee",
     "action_state",
     "flagged",
+    "after_decision",
+    "show_merged",
     "sort",
     "dir",
     "page",
@@ -51,6 +53,8 @@ PARAM_NAMES = {
     "assignee": "ответственный",
     "action_state": "состояние действия",
     "flagged": "подозрительный источник",
+    "after_decision": "новые алерты после решения",
+    "show_merged": "показать объединённые",
     "sort": "сортировка",
     "dir": "направление",
     "page": "страница",
@@ -111,6 +115,9 @@ class IncidentListView:
     assignee: str | None = None
     action_state: tuple[str, ...] = ()
     flagged: str | None = None
+    # фича 005: только инциденты с алертами после решения; показывать поглощённые слиянием
+    after_decision: str | None = None
+    show_merged: bool = False
     sort: str = "severity"
     dir: str = "desc"
     page: int = 1
@@ -153,6 +160,18 @@ class IncidentListView:
             )
             flagged = None
 
+        after_decision = _one(params, "after_decision")
+        if after_decision is not None and after_decision != "only":
+            warnings.append(
+                f"фильтр «новые алерты после решения» не применён: {after_decision!r} — "
+                "допустимо only"
+            )
+            after_decision = None
+        show_merged = _one(params, "show_merged")
+        if show_merged is not None and show_merged not in ("1", "0"):
+            warnings.append(f"параметр «показать объединённые» не применён: {show_merged!r}")
+            show_merged = None
+
         sort = _one(params, "sort") or "severity"
         if sort not in store.SORTS:
             warnings.append(
@@ -173,6 +192,8 @@ class IncidentListView:
             assignee=assignee,
             action_state=_multi(params, "action_state", store.ACTION_STATES, warnings),
             flagged=flagged,
+            after_decision=after_decision,
+            show_merged=show_merged == "1",
             sort=sort,
             dir=direction,
             page=_page(params, warnings),
@@ -188,9 +209,11 @@ class IncidentListView:
         for name in ("status", "severity", "action_state"):
             if getattr(v, name):
                 out[name] = ",".join(getattr(v, name))
-        for name in ("attack_class", "src", "assignee", "flagged"):
+        for name in ("attack_class", "src", "assignee", "flagged", "after_decision"):
             if getattr(v, name):
                 out[name] = getattr(v, name)
+        if v.show_merged:
+            out["show_merged"] = "1"
         if v.sort != "severity":
             out["sort"] = v.sort
         if v.dir != "desc":
@@ -218,7 +241,7 @@ class IncidentListView:
     def filtered(self) -> bool:
         return any(
             (self.status, self.severity, self.attack_class, self.src, self.assignee)
-            + (self.action_state, self.flagged)
+            + (self.action_state, self.flagged, self.after_decision)
         )
 
     def store_filters(self) -> dict:
@@ -230,6 +253,8 @@ class IncidentListView:
             "src_ip": self.src,
             "assignee": self.assignee,
             "action_state": list(self.action_state) or None,
+            "after_decision": self.after_decision,
+            "show_merged": self.show_merged,
         }
 
 
@@ -253,7 +278,10 @@ def list_page(conn: sqlite3.Connection, cfg: SocConfig, view: IncidentListView) 
         item["flags"] = run_flags.get(item["incident_id"], [])
     pages = max(1, math.ceil(total / size))
     summary = store.dashboard_summary(conn, view.run) if view.run else None
+    run = store.get_run(conn, view.run) if view.run else None
     return {
+        # фича 005: фильтры потока показываются только у онлайн-сеанса
+        "stream_run": bool(run and run.get("mode") == "stream"),
         "view": view,
         "total": total,
         "items": items,
@@ -330,6 +358,41 @@ def _audit_text(e: dict) -> str:
         )
     if event == "action_rejected":
         return f"действие отклонено: {label(d.get('action_type'), 'action_type')}"
+    # ---- фича 005
+    if event == "incident_updated":
+        text = f"поток дописал алертов: {d.get('added', 0)}"
+        if d.get("moved"):
+            text += f", перенесено при слиянии: {d['moved']}"
+        text += f"; всего {d.get('n_alerts')}"
+        if d.get("severity_old") != d.get("severity_new"):
+            text += (
+                f"; серьёзность {label(d.get('severity_old'), 'severity')} → "
+                f"{label(d.get('severity_new'), 'severity')}"
+            )
+        if d.get("after_decision"):
+            text += " (после решения аналитика — решение не изменено)"
+        return text
+    if event == "incident_merged":
+        text = (
+            f"инцидент объединён с {d.get('into')}: перенесено алертов {d.get('moved_alerts', 0)}"
+        )
+        if d.get("action_withdrawn"):
+            text += "; предложенное действие снято"
+        return text
+    if event == "action_reproposed":
+        old, new = d.get("old") or {}, d.get("new") or {}
+        return (
+            f"предложение пересчитано: {label(old.get('action_type'), 'action_type')} "
+            f"({old.get('target') or 'без объекта'}) → "
+            f"{label(new.get('action_type'), 'action_type')} "
+            f"({new.get('target') or 'без объекта'}) по правилу {new.get('rule_id')}"
+        )
+    if event == "session_status_changed":
+        return (
+            f"сеанс: {label(d.get('old'), 'session_status')} → "
+            f"{label(d.get('new'), 'session_status')}"
+            + (f" ({d['reason']})" if d.get("reason") else "")
+        )
     return label(event, "event")
 
 
@@ -507,12 +570,21 @@ def alert_probs(
         "run_id": run["run_id"],
         "experts": experts_block(run, alert),
     }
-    path = Path(cfg.runs_dir) / run["run_id"] / "verdicts.parquet"
-    if not path.exists():
+    run_dir = Path(cfg.runs_dir) / run["run_id"]
+    path = run_dir / "verdicts.parquet"
+    # Фича 005: у онлайн-сеанса вердикты — каталог файлов по пачкам (verdicts/part-*.parquet)
+    parts = sorted((run_dir / "verdicts").glob("part-*.parquet")) if not path.exists() else []
+    if not path.exists() and not parts:
         out["reason"] = "вероятности недоступны: файл вердиктов прогона не найден"
         return out
     try:
-        row = pl.scan_parquet(path).filter(pl.col("flow_uid") == flow_uid).collect()
+        source = path if path.exists() else [str(x) for x in parts]
+        row = (
+            pl.scan_parquet(source)
+            .filter(pl.col("flow_uid") == flow_uid)
+            .collect()
+            .unique(subset="flow_uid", keep="first")
+        )
     except (OSError, pl.exceptions.PolarsError) as exc:
         out["reason"] = f"вероятности недоступны: файл вердиктов не читается ({exc})"
         return out
@@ -590,6 +662,46 @@ def dashboard(conn: sqlite3.Connection, cfg: SocConfig, run_id: str) -> dict:
         "n_reversed": summary.get("n_reversed"),
         "direction_mode": summary.get("direction_mode"),
         "before_ensemble": "model" not in summary,
+        # фича 005: онлайн-сеанс — блок «Поток» на панели
+        "stream": run.get("mode") == "stream",
+    }
+
+
+def stream_panel(conn: sqlite3.Connection, run_id: str, lease_ttl_s: float) -> dict:
+    """Блок «Поток» панели сеанса (FR-022, contracts/api-ui-additions): статус сеанса, живость
+    потребителя и последние показатели. Только чтение из SQLite — брокер не опрашивается,
+    чтобы панель не зависала на выключенной машине."""
+    import time
+
+    run = store.get_run(conn, run_id)
+    stats = store.latest_stats(conn, run_id) or {}
+    stream = (run.get("summary") or {}).get("stream") or {}
+    lease = store.lease_info(conn, lease_ttl_s, now=time.time())
+    return {
+        "run": run,
+        "status": run["status"],
+        "consumer_alive": lease["alive"],
+        "consumer": lease["holder"],
+        "rate_per_s": stats.get("rate_per_s"),
+        "lag_messages": stats.get("lag_messages"),
+        "lag_seconds": stats.get("lag_seconds"),
+        "latency_p50_ms": stats.get("latency_p50_ms"),
+        "latency_p95_ms": stats.get("latency_p95_ms"),
+        "rejected": stream.get("n_rejected", 0),
+        "late": stream.get("n_late", 0),
+        "merged": stream.get("n_merged", 0),
+        "after_decision": stream.get("n_after_decision", 0),
+        "end_received": bool(stream.get("end_received")),
+        "last_activity_at": run.get("last_activity_at"),
+        "etag": '"'
+        + store.input_digest(
+            run_id,
+            str(run.get("last_activity_at")),
+            run["status"],
+            str(lease["alive"]),
+            str(stats.get("stat_id")),
+        )[:20]
+        + '"',
     }
 
 
@@ -662,7 +774,16 @@ def audit_details(e: dict) -> list[tuple[str, str]]:
     """Детали записи аудита по-русски: пары «что — значение» для таблицы журнала."""
     d = e["details"]
     rows: list[tuple[str, str]] = []
-    if e["event"] in ("incident_status_changed", "incident_assigned", "action_proposed"):
+    if e["event"] in (
+        "incident_status_changed",
+        "incident_assigned",
+        "action_proposed",
+        # фича 005
+        "incident_updated",
+        "incident_merged",
+        "action_reproposed",
+        "session_status_changed",
+    ):
         rows.append(("изменение", _audit_text(e)))
     if e["event"] in ("action_executed", "action_rejected"):
         rows.append(("действие", _audit_text(e)))

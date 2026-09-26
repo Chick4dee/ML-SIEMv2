@@ -1,0 +1,23 @@
+{#- Блок «Поток» на панели онлайн-сеанса (фича 005, FR-022). Опрашивается раз в refresh
+    секунд; пока ничего не изменилось, сервер отвечает 204 (ETag) и блок не мигает.
+    Показатели — из SQLite (их пишет потребитель), брокер отсюда не опрашивается. -#}
+{% macro num(x, fmt='%.0f', unit='') -%}
+{% if x is none %}—{% else %}{{ fmt | format(x) }}{{ unit }}{% endif %}
+{%- endmacro %}
+<section id="stream-panel" class="group stream-panel"
+         hx-get="/fragments/stream-panel?run={{ run_id | urlencode }}" hx-trigger="every {{ refresh }}s" hx-swap="outerHTML"
+         hx-headers='{{ {"If-None-Match": s.etag} | tojson }}'>
+  <h2>Поток</h2>
+  <dl class="facts">
+    <div><dt>Сеанс</dt><dd data-stream="status"><span class="badge session-{{ s.status }}">{{ s.status | label('session_status') }}</span>{% if s.end_received %} <span class="muted">(получена отметка конца данных)</span>{% endif %}</dd></div>
+    <div><dt>Потребитель</dt><dd data-stream="consumer">{% if s.consumer_alive %}работает ({{ s.consumer }}){% else %}<span class="badge warn">не работает</span>{% endif %}</dd></div>
+    <div><dt>Потоков в секунду</dt><dd class="num" data-stream="rate">{{ num(s.rate_per_s) }}</dd></div>
+    <div><dt>Отставание</dt><dd data-stream="lag">{{ num(s.lag_messages) }} сообщ. · {{ num(s.lag_seconds, '%.1f', ' с') }}</dd></div>
+    <div><dt>Задержка поток → алерт</dt><dd data-stream="latency">p50 {{ num(s.latency_p50_ms, '%.0f', ' мс') }} · p95 {{ num(s.latency_p95_ms, '%.0f', ' мс') }}</dd></div>
+    <div><dt>Отвергнуто</dt><dd class="num" data-stream="rejected">{{ s.rejected }}</dd></div>
+    <div><dt>Опоздавших потоков</dt><dd class="num" data-stream="late">{{ s.late }}</dd></div>
+    <div><dt>Слияний инцидентов</dt><dd class="num" data-stream="merged">{{ s.merged }}</dd></div>
+    <div><dt>Алертов после решения</dt><dd class="num" data-stream="after-decision">{{ s.after_decision }}</dd></div>
+    <div><dt>Последняя активность</dt><dd class="time" data-stream="activity">{{ s.last_activity_at | utc_iso }}</dd></div>
+  </dl>
+</section>

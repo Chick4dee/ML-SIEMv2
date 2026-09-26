@@ -54,6 +54,8 @@
           <td class="ip src">
             <a href="/incidents/{{ i.incident_id | urlencode }}">{{ i.src_ip }}</a>
             {{ flag_badges(i.flags) }}
+            {% if i.alerts_after_decision %}<span class="badge after" title="новые алерты после решения аналитика">+{{ i.alerts_after_decision }} после решения</span>{% endif %}
+            {% if i.merged_into %}<span class="badge merged">объединён с {{ i.merged_into }}</span>{% endif %}
           </td>
           <td class="ip targets">{{ long_list(i.targets) }}</td>
           <td class="num">{{ i.n_alerts }}</td>

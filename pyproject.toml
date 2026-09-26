@@ -28,6 +28,10 @@ dependencies = [
     "joblib",
     # фича 003: разбор HTML-форм консоли (без него Form(...) в FastAPI не работает)
     "python-multipart",
+    # фича 005: клиент Kafka (librdkafka, идемпотентный продюсер, ручное подтверждение позиций)
+    # и быстрый JSON для сообщений о потоках (orjson уже приходил транзитивно — делаем явным)
+    "confluent-kafka",
+    "orjson",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +44,8 @@ dev = [
     # фича 003: разбор HTML страниц консоли в UI-тестах
     "beautifulsoup4",
 ]
+# фича 005: сборка seed-ISO автоустановки брокерной машины (чистый Python, без genisoimage)
+stand = ["pycdlib"]
 
 [project.scripts]
 mlsiem = "mlsiem.cli:main"
@@ -62,5 +68,6 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header"]
 testpaths = ["tests"]
 markers = [
     "slow: тесты на реальных датасетах — данные 001 (data/) и PCAP на диске A:",
+    "stand: тесты на настоящем брокере Kafka (машина mlsiem-broker)",
 ]
-addopts = "-m 'not slow'"
+addopts = "-m 'not slow and not stand'"

@@ -1,0 +1,80 @@
+#cloud-config
+# Автоустановка Ubuntu Server 24.04 для брокерной машины {{ s.vm_name }} (фича 005, research R1–R3).
+# Файл собран командой `mlsiem stand seed-iso` из stand/broker/user-data.yaml.j2 и
+# configs/stream.yaml — руками его не правят: поменяйте конфиг или шаблон и пересоберите.
+#
+# Как это работает:
+# 1. Установщик (subiquity) находит на втором DVD диск с меткой CIDATA и этим файлом, спрашивает
+#    в консоли машины «Continue with autoinstall?» (единственный ручной шаг) и ставит систему:
+#    пакеты берутся из интернета через установочный адаптер (Default Switch, DHCP);
+# 2. на первой загрузке cloud-init кладёт файлы (write_files) и запускает установку Kafka
+#    (runcmd): архив с downloads.apache.org, проверка SHA-512, служба systemd, брандмауэр,
+#    топики. После этого скрипт 30-post-install.ps1 отключает установочный адаптер — в
+#    интернет машина больше не ходит.
+autoinstall:
+  version: 1
+  locale: ru_RU.UTF-8
+  keyboard:
+    layout: us
+  timezone: UTC
+  source:
+    id: ubuntu-server-minimal
+  storage:
+    layout:
+      name: direct
+  network:
+    version: 2
+    ethernets:
+      # Служебная сеть {{ s.mgmt_switch }}: статический адрес, без шлюза — наружу через неё не
+      # ходим, только хост ↔ брокер (FR-003a)
+      mgmt:
+        match:
+          macaddress: "{{ s.mgmt_mac }}"
+        set-name: mgmt0
+        dhcp4: false
+        addresses:
+          - {{ s.broker_ip }}/{{ s.prefix }}
+      # Установочный адаптер (Default Switch): DHCP и интернет только на время установки
+      install:
+        match:
+          macaddress: "{{ s.install_mac }}"
+        set-name: inst0
+        dhcp4: true
+        optional: true
+  ssh:
+    install-server: true
+    allow-pw: false
+  packages:
+    - openjdk-21-jre-headless
+    - ufw
+    - curl
+  late-commands:
+    # Сразу после установки: запрет входа по паролю ещё до первой загрузки
+    - curtin in-target -- sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+  # Настройка установленной системы (cloud-init на первой загрузке)
+  user-data:
+    hostname: {{ s.vm_name }}
+    users:
+      - name: {{ s.admin_user }}
+        groups: [sudo]
+        shell: /bin/bash
+        # Пароля нет вовсе — вход только по SSH-ключу хоста
+        lock_passwd: true
+        sudo: "ALL=(ALL) NOPASSWD:ALL"
+        ssh_authorized_keys:
+          - {{ pubkey }}
+    write_files:
+      - path: /etc/mlsiem/server.properties
+        permissions: "0644"
+        content: |
+{{ server_properties | indent(10, true) }}
+      - path: /etc/systemd/system/kafka.service
+        permissions: "0644"
+        content: |
+{{ kafka_service | indent(10, true) }}
+      - path: /usr/local/sbin/mlsiem-install-kafka.sh
+        permissions: "0755"
+        content: |
+{{ install_script | indent(10, true) }}
+    runcmd:
+      - [bash, /usr/local/sbin/mlsiem-install-kafka.sh]

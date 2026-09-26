@@ -26,7 +26,7 @@
       <label>Прогон
         <select name="run" data-autosubmit>
           {% for r in runs %}
-          <option value="{{ r.run_id }}"{% if r.run_id == run_id %} selected{% endif %}>{{ r.run_id }} · {{ r.source }}</option>
+          <option value="{{ r.run_id }}"{% if r.run_id == run_id %} selected{% endif %}>{{ r.run_id }} · {{ r.source }}{% if r.mode == 'stream' %} · поток, {{ r.status | label('session_status') }}{% endif %}</option>
           {% endfor %}
         </select>
       </label>

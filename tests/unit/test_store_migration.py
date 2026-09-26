@@ -64,8 +64,9 @@ def test_migrate_002_database(tmp_path):
     assert len(before) >= 5
 
     assert store.init_db(conn) is True
-    # Фича 004: цепочка 0 → 2 → 3 проходит за один init_db
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 3
+    # Фичи 004–005: цепочка 0 → 2 → 3 → 4 проходит за один init_db (версия схемы меняется
+    # по спеке каждой фичи — ожидаем текущую)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
 
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(incidents)")]
     assert "assignee" in cols
