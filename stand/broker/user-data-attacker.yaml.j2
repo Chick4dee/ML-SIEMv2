@@ -1,0 +1,152 @@
+#cloud-config
+# Автоустановка Ubuntu Server 24.04 для машины АТАКУЮЩЕГО {{ lab.attacker.vm }} (фича 006, R1/R5/R6).
+# Собрано командой `mlsiem stand seed-iso --role attacker` из stand/broker/user-data-attacker.yaml.j2
+# и configs/stream.yaml — руками не правят: поменяйте конфиг или шаблон и пересоберите.
+#
+# Инструменты — только из репозиториев Ubuntu (nmap, ffuf, hydra, slowhttptest, tcpreplay…);
+# эксплуатации с выполнением кода на жертве нет (вне объёма). Управляет машиной хост по
+# COM-порту ВМ (раннер /opt/mlsiem/lib/mlsiem/lab/runner.py): сети к хосту у машины нет.
+autoinstall:
+  version: 1
+  # IPv6 через Default Switch Hyper-V в интернет не ходит (ICS его не маршрутизирует), а apt
+  # видит IPv6-адрес зеркала и виснет на таймауте. Отключаем IPv6 в установщике до любых
+  # сетевых операций — тогда apt (и Mirror, и in-target) идёт по IPv4 и не зависает.
+  early-commands:
+    - sysctl -w net.ipv6.conf.all.disable_ipv6=1
+    - sysctl -w net.ipv6.conf.default.disable_ipv6=1
+  locale: ru_RU.UTF-8
+  keyboard:
+    layout: us
+  timezone: UTC
+  # ПОЛНЫЙ образ сервера (не -minimal): e2fsprogs, curl, python3 и прочая база уже в системе,
+  # поэтому curtin на шаге «installing missing packages» НИЧЕГО не качает из сети. На minimal
+  # этот онлайн-шаг на нестабильном NAT/зеркале то падал (install_fail), то висел.
+  # Зеркало задаём ЖЁСТКО и выключаем geoip: иначе установщик выбирает страновое зеркало,
+  # которое может висеть, хотя archive.ubuntu.com отвечает. Это убирает зависание apt-get update.
+  apt:
+    geoip: false
+    primary:
+      - arches: [default]
+        uri: "http://archive.ubuntu.com/ubuntu"
+  source:
+    id: ubuntu-server
+  storage:
+    layout:
+      name: direct
+  network:
+    version: 2
+    ethernets:
+      lab:
+        match:
+          macaddress: "{{ lab.lab_mac.attacker }}"
+        set-name: lab0
+        dhcp4: false
+        addresses:
+          - {{ lab.attacker.ip }}/{{ lab.subnet.prefixlen }}
+      install:
+        match:
+          macaddress: "{{ lab.lab_mac.attacker_install }}"
+        set-name: inst0
+        dhcp4: true
+        # DNS от DHCP (Default Switch → туннель) резолвит имена через раз — apt виснет на
+        # разрешении имени зеркала. Берём адрес по DHCP, но DNS жёстко свой, надёжный.
+        dhcp4-overrides:
+          use-dns: false
+        nameservers:
+          addresses: [8.8.8.8, 1.1.1.1]
+        optional: true
+        # MTU уменьшен: интернет ВМ идёт через Default Switch, а тот — через VPN-туннель хоста
+        # (sing-tun). У туннеля меньший размер пакета, поэтому крупные загрузки apt со стандартным
+        # MTU 1500 застревают (PMTUD blackhole). 1280 гарантированно пролезает через любой туннель.
+        mtu: 1280
+  ssh:
+    install-server: true
+    allow-pw: false
+  # На этапе curtin ставим только базу: инструменты (особенно ffuf, которого нет в штатных
+  # репозиториях Ubuntu) ставятся в runcmd при первой загрузке, чтобы отсутствие одного пакета
+  # не валило всю установку (install_fail). Полный список — в runcmd ниже.
+  packages:
+    - curl
+    - python3
+  user-data:
+    hostname: {{ lab.attacker.vm }}
+    users:
+      - name: {{ s.admin_user }}
+        groups: [sudo]
+        shell: /bin/bash
+        lock_passwd: true
+        sudo: "ALL=(ALL) NOPASSWD:ALL"
+        ssh_authorized_keys:
+          - {{ pubkey }}
+    write_files:
+      # Та же причина (IPv6 Default Switch): apt установленной системы — только IPv4, иначе
+      # установка служб/инструментов на первой загрузке зависнет так же, как установщик
+      - path: /etc/apt/apt.conf.d/99force-ipv4
+        permissions: "0644"
+        content: |
+          Acquire::ForceIPv4 "true";
+      # Настройки стенда для раннера: разделы lab, normal, scenarios из configs/stream.yaml
+      - path: /etc/mlsiem/lab.json
+        permissions: "0644"
+        content: |
+{{ lab_json | indent(10, true) }}
+      # Небольшие словари для ffuf и hydra: список путей жертвы и паролей (среди них верный
+      # пароль тестовой учётки — подбор в конце концов «удаётся», как и должен в сценарии)
+      - path: /usr/share/wordlists/common.txt
+        permissions: "0644"
+        content: |
+          admin
+          login
+          api
+          api/status
+          static
+          backup
+          config
+          console
+          test
+          index.html
+          robots.txt
+      - path: /usr/share/wordlists/pass.txt
+        permissions: "0644"
+        content: |
+          123456
+          password
+          qwerty
+          letmein
+          admin123
+          {{ lab.victim.ssh_password }}
+          welcome1
+          iloveyou
+{% for f in runner_files %}
+      - path: {{ f.path }}
+        permissions: "0644"
+        content: |
+{{ f.text | indent(10, true) }}
+{% endfor %}
+      - path: /etc/systemd/system/mlsiem-lab-runner.service
+        permissions: "0644"
+        content: |
+          [Unit]
+          Description=mlsiem lab runner (команды хоста по COM-порту)
+          After=multi-user.target
+
+          [Service]
+          Environment=PYTHONPATH=/opt/mlsiem/lib
+          ExecStart=/usr/bin/python3 -m mlsiem.lab.runner /dev/ttyS0
+          Restart=always
+          RestartSec=2
+
+          [Install]
+          WantedBy=multi-user.target
+    runcmd:
+      - [mkdir, -p, /var/lib/mlsiem]
+      # Инструменты атакующего из репозиториев Ubuntu (интернет ещё есть через install-адаптер).
+      # Сбой здесь не валит установку ОС — в отличие от этапа curtin
+      - [bash, -c, "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y nmap hydra slowhttptest hping3 tcpreplay sshpass bind9-dnsutils gobuster || true"]
+      # ffuf в штатных репозиториях Ubuntu отсутствует: ставим из snap, иначе остаётся gobuster
+      # (сценарий web_fuzz умеет оба каталогизатора веб-путей)
+      - [bash, -c, "snap install ffuf 2>/dev/null || apt-get install -y ffuf 2>/dev/null || true"]
+      # Порт занят консолью по умолчанию — освобождаем его для раннера
+      - [systemctl, mask, serial-getty@ttyS0.service]
+      - [systemctl, daemon-reload]
+      - [systemctl, enable, --now, mlsiem-lab-runner.service]

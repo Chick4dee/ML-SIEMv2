@@ -143,3 +143,97 @@ uv run mlsiem stream close --session ID                   # завершить �
   `uv run pytest -m stand` (после подъёма стенда).
 
 Сценарии проверки — `specs/005-kafka-streaming-chain/quickstart.md`.
+
+
+## Детектор на окнах потоков (фича 007)
+
+Кроме вердикта по каждому потоку, цепочка может смотреть на **минуту трафика одного
+атакующего целиком** («окно»: атакующая сторона × 60 с). Эксперимент честно сравнивает три
+участника на окнах `unsw_time`: бустинг на сводных признаках окна, двунаправленный GRU на
+последовательности потоков окна и текущую модель 002/004, сведённую к окну максимумом. Выбор —
+только по val (macro PR-AUC надёжных классов, прирост ≥ 0.01 в два шага), принять модель в
+цепочку может только аудит на артефакты.
+
+```
+uv sync --extra dev --extra nn                                 # PyTorch (cu128) — для нейросети
+uv run mlsiem detect windows [--device auto|cuda|cpu] [--skip-nn]   # эксперимент → models/windows
+uv run mlsiem detect windows-audit                             # артефакты, перенос → accepted
+uv run mlsiem detect windows-errors [--part test]              # что ловят окна и чего нет
+uv run dvc repro --single-item train_windows                   # эксперимент + аудит стадией DVC
+uv run mlsiem soc run --split unsw_time --part test --windows auto   # auto | off | force
+uv run mlsiem stream consume --windows auto                    # то же онлайн
+```
+
+- `models/windows/`: `window_card.json` (вид, версия, порог, параметры окна и **решение**:
+  прошёл ли выбор, вердикт аудита, итоговое `accepted`), модель, `experiment.json`. Победитель
+  сохраняется всегда, даже при отрицательном результате. Отчёты —
+  `reports/windows_experiment.md`, `reports/windows_audit.md`, `reports/windows_errors.md`.
+- Как читать решение: `passed_selection` — окна дали прирост над текущей моделью на val;
+  `audit_verdict: clean` — без подозрительных признаков качество не падает на 0.10 и больше;
+  `accepted = passed_selection И clean`. Цепочка в режиме `auto` включает эксперт окон только
+  при `accepted: true`; `force` — включить и непринятую модель (с предупреждением), `off` —
+  как в 005.
+- Алерт окна — отдельная строка алертов (`kind: window`, описание окна в `window`), он
+  группируется в инциденты вместе с алертами потоков. В консоли: метка «окно», переключатель
+  «все / потоки / окна», раскрывающийся блок окна (интервал, цели, порты, подозрительные
+  потоки, влиятельные признаки), значок и фильтр в списке, панель «эксперт окон», блок «Окна»
+  у онлайн-сеанса. API — `kind`, `window`, `?kind=`, `n_window_alerts`, `has_window_alerts`,
+  `windows` у прогона. База мигрирует до схемы 5 сама (сделайте копию `var/soc.db`).
+- `--single-item` у `dvc repro` обязателен: без него DVC сначала пересобирает вышестоящие
+  стадии, а `train_detector` зависит от всего `src/mlsiem/detect`. Любая правка там — и DVC
+  удалит и переобучит детектор 002 (и ансамбль 004), сменив их версии под всеми прогонами в
+  базе. Так 2026-09-26 прерванный repro оставил проект без `models/detector`.
+- Без PyTorch работает всё, кроме обучения нейросети: `--skip-nn` сравнивает только бустинг и
+  текущую модель. Тесты нейросети — `uv run pytest -m nn`.
+
+Конфиг эксперимента — `configs/windows.yaml`. Сценарии проверки —
+`specs/007-flow-window-detector/quickstart.md`.
+
+## Лабораторный стенд и живой сенсор (фича 006)
+
+Поверх брокера и сетей 005 на Hyper-V поднимаются две машины в сети стенда `mlsiem-lab`
+(Private): **жертва** `10.88.0.20` (web/SSH/FTP/DNS) и **атакующий** `10.88.0.30` (nmap, ffuf,
+hydra, slowhttptest, tcpreplay). **Живой сенсор** на брокерной машине принимает зеркало портов
+`mlsiem-lab` и тем же экстрактором nfstream 001 превращает трафик стенда в потоки, отправляя их
+в брокер как источник `sensor:live`. Дальше работает готовая онлайн-цепочка 005. Сквозной
+результат: `mlsiem lab demo` → через минуты инцидент в консоли с атакующим адресом стенда.
+
+```
+uv run mlsiem stand seed-iso --role victim|attacker        # seed-ISO машины стенда (только файл)
+uv run mlsiem stream sensor start [--iface eth1]           # живой сенсор → брокер (sensor:live)
+uv run mlsiem stream sensor status | stop                  # показатели сенсора; завершить сеанс
+uv run mlsiem lab scenario list                            # сценарии из конфига
+uv run mlsiem lab scenario run <имя> [--version V]         # запуск на атакующей (через канал)
+uv run mlsiem lab normal start | stop                      # фоновая норма (benign)
+uv run mlsiem lab demo                                     # готовность → control_replay → сводка
+uv run mlsiem lab report --run <run_uid>                   # отчёт по запуску сценария
+uv run mlsiem lab dataset build --pcap … --journal …       # размеченный набор data/lab/<версия>
+uv run mlsiem lab evaluate --dataset <версия> [--model DIR] # честная оценка переноса модели
+```
+
+- Машины стенда поднимают скрипты `stand/hyperv/40…91-*.ps1` (от администратора, с
+  подтверждением, `-WhatIf` — план) — пошагово в `stand/hyperv/README.md`. Шаблоны
+  автоустановки ролей — `stand/broker/user-data-{victim,attacker}.yaml.j2`.
+- **Изоляция (FR-005):** у машин стенда только сеть `mlsiem-lab`, служебной сети нет; хост
+  управляет атакующим по **COM-порту** его ВМ (канал гипервизора, не сеть); сенсор слышит
+  стенд через зеркало портов, своего адреса в `mlsiem-lab` не имея; сценарии бьют только по
+  целям из `lab.subnet`, иначе запуск отклоняется. Действия SOAR по инцидентам стенда только
+  симулируются.
+- **train = serve:** сенсор использует тот же `NFStreamer` и `SCHEMA.extractor`, что 001;
+  idle/active-таймауты в живом режиме не меняются (поток уходит через ≥ idle_timeout). Буфер
+  отправки переживает кратковременную недоступность брокера; потери честно считаются и
+  поднимают флаг «с потерями» (виден в `stream sensor status` и на панели консоли).
+- **Набор стенда** `data/lab/<версия>/` (DVC, стадия `lab_dataset`) — первый собственный
+  размеченный набор (benign/класс/`ambiguous`), не смешивается с UNSW/CTU-13 и не используется
+  для обучения в 006. `dvc repro --single-item lab_dataset` обязателен (как `train_windows`).
+- **Оценка** берёт модель и порог из артефакта как есть (порог не подбирается на стенде),
+  считает PR-AUC macro и «атака/нет», поимку по сценариям, FPR на норме; для непойманного —
+  разбор причины (вне таксономии / вне распределения train / потери сенсора); пишет в MLflow
+  (эксперимент `lab`) и `docs/JOURNAL.md`. Слабый перенос модели 2015 года на трафик стенда —
+  это честная находка, а не сбой; демо держится на контрольном сценарии `control_replay`.
+- Быстрые тесты не требуют ВМ и прав админа (захват — запись `tests/fixtures/lab_sample.pcap`,
+  брокер — MemoryBroker 005). Живые проверки на поднятом стенде — `uv run pytest -m lab`. База
+  мигрирует до схемы 6 сама (сделайте копию `var/soc.db`).
+
+Все параметры стенда — `configs/stream.yaml` (разделы `lab`, `normal`, `scenarios`). Сценарии
+проверки — `specs/006-lab-stand-live-sensor/quickstart.md`.

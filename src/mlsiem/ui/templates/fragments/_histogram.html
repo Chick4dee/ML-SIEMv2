@@ -1,6 +1,8 @@
 {#- Гистограмма алертов инцидента по времени (FR-011): столбики считает база, рисует сервер
     статичным SVG — без скриптов и библиотек графиков. Число алертов каждого столбика —
-    в <title> (всплывающая подсказка браузера). Цвет задаётся классом в console.css. -#}
+    в <title> (всплывающая подсказка браузера). Цвет задаётся классом в console.css.
+    Фича 007: алерты окон — вторым, другим цветом слоем поверх того же столбика (их число
+    входит в общий столбик: counts считает все алерты). -#}
 {% set h = histogram %}
 {% set n = h.counts | length %}
 {% set top = h.counts | max if n else 0 %}
@@ -11,11 +13,15 @@
     {% set bh = (c / top * 100) if top else 0 %}
     <rect class="bar" x="{{ '%.2f' | format(loop.index0 * w + 0.5) }}" y="{{ '%.2f' | format(105 - bh) }}" width="{{ '%.2f' | format([w - 1, 0.5] | max) }}" height="{{ '%.2f' | format(bh) }}"><title>{{ c }} алертов, с {{ (h.start_ms + loop.index0 * h.bin_ms) | utc_ms }}</title></rect>
     {% endfor %}
+    {% for c in h.window_counts or [] %}{% if c %}
+    {% set bh = (c / top * 100) if top else 0 %}
+    <rect class="bar window" x="{{ '%.2f' | format(loop.index0 * w + 0.5) }}" y="{{ '%.2f' | format(105 - bh) }}" width="{{ '%.2f' | format([w - 1, 0.5] | max) }}" height="{{ '%.2f' | format(bh) }}"><title>из них алертов окон: {{ c }}</title></rect>
+    {% endif %}{% endfor %}
     <line class="axis" x1="0" y1="105.5" x2="600" y2="105.5"></line>
   </svg>
   <figcaption>
     <span>{{ h.start_ms | utc_ms }}</span>
-    <span class="muted">шаг {{ (h.bin_ms / 1000) | round(1) }} с · максимум {{ top }} в интервале</span>
+    <span class="muted">шаг {{ (h.bin_ms / 1000) | round(1) }} с · максимум {{ top }} в интервале{% if (h.window_counts or []) | sum %} · <span class="legend-window">■</span> алерты окон{% endif %}</span>
     <span>{{ h.end_ms | utc_ms }}</span>
   </figcaption>
 </figure>

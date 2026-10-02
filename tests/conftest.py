@@ -108,3 +108,64 @@ def tiny_ensemble(synthetic_split, tiny_detector, tmp_path_factory) -> Path:
         force_variant="stack_logreg",
     )
     return root / "ensemble"
+
+
+# ---------------------------------------------------------------- фича 007
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_repo_window_model():
+    """Тесты 002–005 берут configs/soc.yaml из репозитория, а там `windows.mode: auto` и
+    `windows.model: models/windows` — рабочая модель окон владельца. Если её примет аудит, то
+    старые тесты цепочки вдруг получили бы алерты окон. Поэтому в тестах режим auto
+    не видит рабочую модель репозитория; тесты 007 указывают модель явно (tiny_windows).
+
+    Уровень — вся сессия, а не функция: эталоны в тестах 005 — фикстуры уровня модуля, и
+    функциональная подмена до них не доходила. Пока рабочая модель была не принята, этого не
+    было видно; после аудита 2026-09-26 (accepted: true) эталон надёжности 005 молча получил
+    алерты окон, а проверяемый прогон — нет."""
+    import mlsiem.detect.windows_expert as we
+
+    monkeypatch = pytest.MonkeyPatch()
+
+    real = we.resolve_window_expert
+    repo_model = (Path(__file__).parents[1] / "models" / "windows").resolve()
+
+    def guarded(soc_cfg, mode=None, path=None):
+        chosen_mode = mode or soc_cfg.windows.mode
+        chosen_path = Path(path or soc_cfg.windows.model).resolve()
+        if chosen_mode == "auto" and chosen_path == repo_model:
+            return we.WindowsChoice("auto", None, "рабочая модель репозитория в тестах не видна")
+        return real(soc_cfg, mode, path)
+
+    monkeypatch.setattr(we, "resolve_window_expert", guarded)
+    yield
+    monkeypatch.undo()
+
+
+@pytest.fixture(scope="session")
+def tiny_windows_experiment(synthetic_split, tiny_detector, tmp_path_factory) -> dict:
+    """Эксперимент окон настоящим `run_windows_experiment` на синтетике (быстрый путь
+    --skip-nn: только бустинг и текущая модель) — модель, протокол, отчёт."""
+    from fixtures.small_configs import small_windows_raw
+    from mlsiem.detect.windows import parse_windows_config
+    from mlsiem.detect.windows_experiment import run_windows_experiment
+
+    root = tmp_path_factory.mktemp("tiny_windows")
+    cfg = parse_windows_config(small_windows_raw(root))
+    exp = run_windows_experiment(
+        cfg,
+        skip_nn=True,
+        mlflow_dir=root,
+        data_dir=synthetic_split,
+        reports_dir=root / "reports",
+        current_dir=tiny_detector,
+    )
+    return {"root": root, "model": root / "windows", "exp": exp, "cfg": cfg}
+
+
+@pytest.fixture(scope="session")
+def tiny_windows(tiny_windows_experiment) -> Path:
+    """Модель окон lgbm на синтетике с `accepted: false` (на синтетике окна не лучше потоков:
+    обе модели идеальны) — для тестов цепочки через `force`, как `force_variant` в 004."""
+    return tiny_windows_experiment["model"]

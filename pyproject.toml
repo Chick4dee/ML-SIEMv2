@@ -46,9 +46,23 @@ dev = [
 ]
 # фича 005: сборка seed-ISO автоустановки брокерной машины (чистый Python, без genisoimage)
 stand = ["pycdlib"]
+# фича 007: нейросеть окон (GRU) — PyTorch с колёсами CUDA 12.8 (RTX 3060 Ti, драйвер 610.74).
+# Отдельная группа: ~2.5 ГБ нужны только эксперименту `detect windows` и эксперту окон вида
+# gru; цепочка, бустинг окон и быстрые тесты работают без неё (`uv sync --extra nn`)
+nn = ["torch>=2.4,<3"]
 
 [project.scripts]
 mlsiem = "mlsiem.cli:main"
+
+# Фича 007: torch берётся из индекса PyTorch (колёса с CUDA), а не с PyPI (там для Windows —
+# только CPU). explicit = true — из этого индекса берётся ТОЛЬКО torch, остальное — с PyPI
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", extra = "nn" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mlsiem"]
@@ -69,5 +83,9 @@ testpaths = ["tests"]
 markers = [
     "slow: тесты на реальных датасетах — данные 001 (data/) и PCAP на диске A:",
     "stand: тесты на настоящем брокере Kafka (машина mlsiem-broker)",
+    # фича 006: живые проверки на поднятом стенде (сенсор, сценарии, изоляция) — только явным -m lab
+    "lab: тесты на поднятом лабораторном стенде 006 (ВМ жертвы, атакующего, живой сенсор)",
+    # фича 007: без PyTorch такие тесты пропускаются через pytest.importorskip("torch")
+    "nn: тесты, которым нужен PyTorch (группа зависимостей nn)",
 ]
-addopts = "-m 'not slow and not stand'"
+addopts = "-m 'not slow and not stand and not lab'"

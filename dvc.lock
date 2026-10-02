@@ -423,3 +423,113 @@ stages:
       hash: md5
       md5: d6f2d430750af5bd7e67d34baea96d67
       size: 2701
+  train_windows:
+    cmd: uv run mlsiem detect windows && uv run mlsiem detect windows-audit
+    deps:
+    - path: configs/soc.yaml
+      hash: md5
+      md5: 3c0ff25964b68d1756d862ef1bf0f3f4
+      size: 7032
+    - path: data/audit/unsw_time.parquet
+      hash: md5
+      md5: 5edb75370e387afe400a4c76692d4c33
+      size: 4263
+    - path: data/flows/unsw
+      hash: md5
+      md5: b4c3d263a6bfefef534f6e8bdc58963b.dir
+      size: 184763685
+      nfiles: 162
+    - path: data/splits/unsw_cross_day.parquet
+      hash: md5
+      md5: 114a63dc57ef6dc295a45a33f980383d
+      size: 975148
+    - path: data/splits/unsw_time.parquet
+      hash: md5
+      md5: b4edf94a088781015384864f136f1ca9
+      size: 956645
+    - path: models/detector
+      hash: md5
+      md5: fa0eb55488130164346d3625da8cac54.dir
+      size: 27616149
+      nfiles: 3
+    - path: models/ensemble
+      hash: md5
+      md5: 57ac76c49dd328aab14704f0171139a4.dir
+      size: 46226
+      nfiles: 2
+    - path: src/mlsiem/detect/windows.py
+      hash: md5
+      md5: 14cee1cf0e183a08a1d6324a154431ff
+      size: 31877
+    - path: src/mlsiem/detect/windows_audit.py
+      hash: md5
+      md5: 06e19f211ecd3eb7c84685afa0f4c979
+      size: 50446
+    - path: src/mlsiem/detect/windows_experiment.py
+      hash: md5
+      md5: f26aa21245ce9aa03b52de6ded708e3c
+      size: 37658
+    - path: src/mlsiem/detect/windows_expert.py
+      hash: md5
+      md5: 1577bec2490d09e267c743683752eb9b
+      size: 22532
+    - path: src/mlsiem/detect/windows_nn.py
+      hash: md5
+      md5: 4cf6b9a455c4541d39c6b28089b8f9e6
+      size: 14727
+    params:
+      configs/windows.yaml:
+        audit:
+          max_drop: 0.1
+          single_feature_share: 0.9
+        candidates:
+          lgbm:
+            n_estimators: 400
+            learning_rate: 0.05
+            num_leaves: 63
+            class_weight: balanced
+            early_stopping_rounds: 30
+          gru:
+            proj: 64
+            hidden: 96
+            dropout: 0.2
+            lr: 0.001
+            weight_decay: 0.0001
+            batch: 256
+            max_epochs: 40
+            patience: 5
+            class_weight_cap: 50
+            amp: true
+        current_aggregate: max
+        current_model: auto
+        output: models/windows
+        seed: 42
+        selection:
+          metric: macro_pr_auc_reliable_val
+          min_class_windows: 20
+          min_gain: 0.01
+        split: unsw_time
+        transfer_split: unsw_cross_day
+        window:
+          length_ms: 60000
+          seq_max: 128
+          train_shifts_ms:
+          - 0
+          - 15000
+          - 30000
+          - 45000
+          holdout_share: 0.1
+    outs:
+    - path: models/windows
+      hash: md5
+      md5: 66461d89869e7def1ef311a7ccf99171.dir
+      size: 6342044
+      nfiles: 4
+    - path: reports/windows_audit.md
+      hash: md5
+      md5: aa02a7932274365604f6847219c2b648
+      size: 6981
+    - path: reports/windows_experiment.md
+      hash: md5
+      md5: c98f4d1544bfd36ebea2820a7bf98ae4
+      size: 5082

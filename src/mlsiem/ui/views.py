@@ -118,6 +118,8 @@ class IncidentListView:
     # фича 005: только инциденты с алертами после решения; показывать поглощённые слиянием
     after_decision: str | None = None
     show_merged: bool = False
+    # фича 007: только инциденты, в которых есть алерты окон
+    windows: str | None = None
     sort: str = "severity"
     dir: str = "desc"
     page: int = 1
@@ -167,6 +169,10 @@ class IncidentListView:
                 "допустимо only"
             )
             after_decision = None
+        windows = _one(params, "windows")
+        if windows is not None and windows != "only":
+            warnings.append(f"фильтр «есть алерты окон» не применён: {windows!r} — допустимо only")
+            windows = None
         show_merged = _one(params, "show_merged")
         if show_merged is not None and show_merged not in ("1", "0"):
             warnings.append(f"параметр «показать объединённые» не применён: {show_merged!r}")
@@ -194,6 +200,7 @@ class IncidentListView:
             flagged=flagged,
             after_decision=after_decision,
             show_merged=show_merged == "1",
+            windows=windows,
             sort=sort,
             dir=direction,
             page=_page(params, warnings),
@@ -209,7 +216,7 @@ class IncidentListView:
         for name in ("status", "severity", "action_state"):
             if getattr(v, name):
                 out[name] = ",".join(getattr(v, name))
-        for name in ("attack_class", "src", "assignee", "flagged", "after_decision"):
+        for name in ("attack_class", "src", "assignee", "flagged", "after_decision", "windows"):
             if getattr(v, name):
                 out[name] = getattr(v, name)
         if v.show_merged:
@@ -241,7 +248,7 @@ class IncidentListView:
     def filtered(self) -> bool:
         return any(
             (self.status, self.severity, self.attack_class, self.src, self.assignee)
-            + (self.action_state, self.flagged, self.after_decision)
+            + (self.action_state, self.flagged, self.after_decision, self.windows)
         )
 
     def store_filters(self) -> dict:
@@ -255,6 +262,7 @@ class IncidentListView:
             "action_state": list(self.action_state) or None,
             "after_decision": self.after_decision,
             "show_merged": self.show_merged,
+            "has_window_alerts": True if self.windows == "only" else None,
         }
 
 
@@ -452,7 +460,11 @@ def timeline(inc: dict, audit: list[dict], first: dict | None, last: dict | None
 
 
 def incident_card(
-    conn: sqlite3.Connection, cfg: SocConfig, incident_id: str, alerts_page: int = 1
+    conn: sqlite3.Connection,
+    cfg: SocConfig,
+    incident_id: str,
+    alerts_page: int = 1,
+    alerts_kind: str | None = None,
 ) -> dict:
     """Всё для карточки: инцидент, метки, алерты (страница), гистограмма, хронология, аудит."""
     inc = store.get_incident(conn, incident_id)
@@ -467,26 +479,58 @@ def incident_card(
         "audit": audit,
         "histogram": store.alert_histogram(conn, incident_id),
         "timeline": timeline(inc, audit, first[0] if first else None, last[0] if last else None),
-        "alerts": alerts_page_data(conn, cfg, incident_id, alerts_page),
+        "alerts": alerts_page_data(
+            conn, cfg, incident_id, alerts_page, alerts_kind, n_window=inc["n_window_alerts"]
+        ),
         "related_flags": [f for f in inc["flags"] if f.kind == "target_elsewhere"],
         # фича 004: кто поднял алерты инцидента
         "experts_summary": store.experts_summary(conn, incident_id),
     }
 
 
-def alerts_page_data(conn: sqlite3.Connection, cfg: SocConfig, incident_id: str, page: int):
+def alert_kind(value: str | None) -> str | None:
+    """Вид алертов из адреса: `flow` | `window`; всё прочее — «все» (без ошибки: это вид
+    таблицы, а не фильтр данных, и кривой адрес просто показывает всё)."""
+    return value if value in store.ALERT_KINDS else None
+
+
+def alerts_page_data(
+    conn: sqlite3.Connection,
+    cfg: SocConfig,
+    incident_id: str,
+    page: int,
+    kind: str | None = None,
+    *,
+    n_window: int | None = None,
+):
     size = cfg.ui.alerts_page_size
-    total, items = store.list_alerts(conn, incident_id, size, (max(page, 1) - 1) * size)
+    kind = alert_kind(kind)
+    total, items = store.list_alerts(conn, incident_id, size, (max(page, 1) - 1) * size, kind=kind)
+    if n_window is None:
+        n_window = store.get_incident(conn, incident_id)["n_window_alerts"]
     card = f"/incidents/{quote(incident_id, safe='')}"
+    frag = f"/fragments/incidents/{quote(incident_id, safe='')}/alerts"
+
+    def card_url(n: int, k: str | None) -> str:
+        return f"{card}?alerts_page={n}" + (f"&alerts_kind={k}" if k else "") + "#alerts"
+
+    def frag_url(n: int, k: str | None) -> str:
+        return f"{frag}?page={n}" + (f"&kind={k}" if k else "")
+
     return {
         "incident_id": incident_id,
         "total": total,
         "items": items,
         "page": max(page, 1),
         "pages": max(1, math.ceil(total / size)),
+        # фича 007: вид алертов в таблице и переключатель (показывается, если есть окна)
+        "kind": kind,
+        "n_window": n_window,
+        "kind_href": lambda k: card_url(1, k),
+        "kind_hx": lambda k: frag_url(1, k),
         # ссылки пагинации: без JS — вся карточка на нужной странице, с htmx — только таблица
-        "href": lambda n: f"{card}?alerts_page={n}#alerts",
-        "hx": lambda n: f"/fragments/incidents/{quote(incident_id, safe='')}/alerts?page={n}",
+        "href": lambda n: card_url(n, kind),
+        "hx": lambda n: frag_url(n, kind),
     }
 
 
@@ -664,6 +708,31 @@ def dashboard(conn: sqlite3.Connection, cfg: SocConfig, run_id: str) -> dict:
         "before_ensemble": "model" not in summary,
         # фича 005: онлайн-сеанс — блок «Поток» на панели
         "stream": run.get("mode") == "stream",
+        # фича 007: эксперт окон прогона (None — прогон до 007)
+        "windows": windows_box(run.get("windows")),
+    }
+
+
+def windows_box(w: dict | None) -> dict:
+    """Панель «эксперт окон»: «<вид> <версия> (принят / принудительно / не принят / нет)»,
+    число окон и алертов окон (contracts/api-ui-additions.md)."""
+    if w is None:
+        return {"title": "нет (прогон до детектора окон)", "enabled": False, "state": "none"}
+    if not w.get("enabled"):
+        return {
+            "title": f"нет — {w.get('reason') or 'выключен'}",
+            "enabled": False,
+            "state": "off",
+        }
+    state = "accepted" if w.get("accepted") else "forced"
+    mark = "принят" if state == "accepted" else "принудительно, модель не принята"
+    return {
+        "title": f"{w.get('kind')} {w.get('expert_version')} ({mark})",
+        "enabled": True,
+        "state": state,
+        "n_windows": w.get("n_windows", 0),
+        "n_window_alerts": w.get("n_window_alerts", 0),
+        "length_s": (w.get("length_ms") or 0) / 1000,
     }
 
 
@@ -677,6 +746,8 @@ def stream_panel(conn: sqlite3.Connection, run_id: str, lease_ttl_s: float) -> d
     stats = store.latest_stats(conn, run_id) or {}
     stream = (run.get("summary") or {}).get("stream") or {}
     lease = store.lease_info(conn, lease_ttl_s, now=time.time())
+    # Фича 006: показатели живого сенсора (пишутся отдельными строками, у источников 005 — нет)
+    sensor = store.latest_sensor_stats(conn, run_id)
     return {
         "run": run,
         "status": run["status"],
@@ -693,6 +764,11 @@ def stream_panel(conn: sqlite3.Connection, run_id: str, lease_ttl_s: float) -> d
         "after_decision": stream.get("n_after_decision", 0),
         "end_received": bool(stream.get("end_received")),
         "last_activity_at": run.get("last_activity_at"),
+        # фича 006: показатели живого сенсора (None у источников-проигрывателей 005)
+        "sensor": sensor,
+        "lossy": bool(run.get("lossy")),
+        # фича 007: окна сеанса (только если эксперт окон включён)
+        "windows": run.get("windows") if (run.get("windows") or {}).get("enabled") else None,
         "etag": '"'
         + store.input_digest(
             run_id,

@@ -22,6 +22,11 @@ latin-1, поэтому имя пишется латиницей (наприме
 Фича 004 — тоже только добавления (FR-018): у алерта атакующая сторона и ответы экспертов,
 у карточки инцидента сводка «кто поднял алерты», у прогона — модель прогона. Для прогонов
 до ансамбля новые поля — null (FR-020); берутся они из SQLite, а не из parquet-файлов.
+
+Фича 007 — тоже только добавления (contracts/api-ui-additions.md): вид алерта `kind`
+(`flow` | `window`) и описание окна `window`, фильтр `?kind=` у алертов инцидента, число алертов
+окон и фильтр `has_window_alerts` у инцидентов, раздел `windows` у прогона, показатели окон
+у сеансов потока. Прогоны до 007 открываются как прежде: `kind = "flow"`, `window = null`.
 """
 
 from __future__ import annotations
@@ -106,6 +111,8 @@ class IncidentItem(BaseModel):
     merged_into: str | None = None
     alerts_after_decision: int = 0
     first_after_decision_ms: int | None = None
+    # фича 007: сколько алертов инцидента подняли окна (0 у прогонов до 007)
+    n_window_alerts: int = 0
 
 
 class ExpertsCombination(BaseModel):
@@ -161,6 +168,10 @@ class Alert(BaseModel):
     experts: dict[str, dict[str, Any]] | None = None
     fired_experts: list[str] | None = None
     explanation: str | None = None
+    # фича 007: вид алерта и описание окна (null у алертов потоков). У алерта окна
+    # src_port, dst_port, protocol = null, а flow_uid = window_id
+    kind: Literal["flow", "window"] = "flow"
+    window: dict[str, Any] | None = None
 
 
 class AlertPage(BaseModel):
@@ -205,6 +216,8 @@ class Run(BaseModel):
     status: str = "completed"
     source_id: str | None = None
     last_activity_at: str | None = None
+    # фича 007: раздел «эксперт окон» сводки; null — прогон до 007
+    windows: dict[str, Any] | None = None
 
 
 class RunList(BaseModel):
@@ -243,6 +256,11 @@ class StreamSession(BaseModel):
     late: int
     rate_per_s: float | None
     last_activity_at: str | None
+    # фича 007: показатели окон — только у сеанса с экспертом окон, иначе null
+    n_open_windows: int | None = None
+    n_windows_closed: int | None = None
+    n_window_alerts: int | None = None
+    n_window_late_dropped: int | None = None
 
 
 class StreamStatus(BaseModel):
@@ -405,6 +423,7 @@ def create_app(
         flagged: Literal["only", "hide"] | None = None,
         after_decision: Literal["only"] | None = None,
         show_merged: bool = False,
+        has_window_alerts: bool | None = None,
         sort: Literal["severity", "first_seen", "last_seen", "n_alerts"] | None = None,
         dir: Literal["asc", "desc"] | None = None,
         limit: int = Query(50, ge=1, le=MAX_LIMIT),
@@ -423,6 +442,7 @@ def create_app(
             "action_state": _csv(action_state, store.ACTION_STATES, "action_state"),
             "after_decision": after_decision,
             "show_merged": show_merged,
+            "has_window_alerts": has_window_alerts,
         }
         if flagged == "only":
             filters["incident_ids"] = flagged_ids(conn, run_id)
@@ -455,11 +475,12 @@ def create_app(
     @app.get(PREFIX + "/incidents/{incident_id}/alerts", response_model=AlertPage)
     def incident_alerts(
         incident_id: str,
+        kind: Literal["flow", "window"] | None = None,
         limit: int = Query(50, ge=1, le=MAX_LIMIT),
         offset: int = Query(0, ge=0),
         conn=Depends(db),
     ):
-        total, items = store.list_alerts(conn, incident_id, limit, offset)
+        total, items = store.list_alerts(conn, incident_id, limit, offset, kind=kind)
         return {"total": total, "items": items}
 
     @app.post(PREFIX + "/incidents/{incident_id}/status", response_model=IncidentCard)

@@ -1,30 +1,97 @@
 {#- Алерты инцидента постранично (FR-010). Вероятности по классам подгружаются только при
     раскрытии алерта: они лежат в verdicts.parquet, и читать их для всех строк незачем.
     Без JS внутри <details> — обычная ссылка на тот же фрагмент.
-    Фича 004: значок «ответный» у перевёрнутых потоков и колонка «Эксперты» (К, А, К+А, М). -#}
+    Фича 004: значок «ответный» у перевёрнутых потоков и колонка «Эксперты» (К, А, К+А, М).
+    Фича 007: у каждого алерта метка «поток» или «окно», переключатель «все / потоки / окна»
+    (только если в инциденте есть окна), алерт окна раскрывается блоком с описанием окна —
+    оно уже лежит в строке алерта (window_info), догружать нечего. -#}
 {% from "macros.html" import pager with context %}
 <div id="alerts" class="alerts-box">
-  <p class="count">Всего алертов: <strong>{{ alerts.total }}</strong>{% if alerts.pages > 1 %}, страница {{ alerts.page }} из {{ alerts.pages }}{% endif %}</p>
+  {% if alerts.n_window or alerts.kind %}
+  <nav class="kind-switch" aria-label="Вид алертов">
+    {% for k, title in ((none, 'все'), ('flow', 'потоки'), ('window', 'окна')) %}
+    {% if alerts.kind == k %}<strong aria-current="true">{{ title }}</strong>{% else %}<a href="{{ alerts.kind_href(k) }}" hx-get="{{ alerts.kind_hx(k) }}" hx-target="#alerts" hx-swap="outerHTML" data-kind="{{ k or 'all' }}">{{ title }}</a>{% endif %}{% if not loop.last %} · {% endif %}
+    {% endfor %}
+    <span class="muted">(алертов окон: {{ alerts.n_window }})</span>
+  </nav>
+  {% endif %}
+  <p class="count">Всего алертов{% if alerts.kind == 'flow' %} потоков{% elif alerts.kind == 'window' %} окон{% endif %}: <strong>{{ alerts.total }}</strong>{% if alerts.pages > 1 %}, страница {{ alerts.page }} из {{ alerts.pages }}{% endif %}</p>
   {% if alerts['items'] %}
   <div class="table-wrap">
     <table class="alerts">
       <thead>
         <tr>
           <th scope="col">Начало потока (время трафика)</th>
+          <th scope="col">Вид</th>
           <th scope="col">Источник</th>
           <th scope="col">Цель</th>
           <th scope="col">Протокол</th>
           <th scope="col">Класс</th>
           <th scope="col">Уверенность</th>
           <th scope="col">Эксперты</th>
-          <th scope="col">Вероятности детектора</th>
+          <th scope="col">Подробнее</th>
         </tr>
       </thead>
       <tbody>
         {% for a in alerts['items'] %}
-        {% set probs_url = "/fragments/alerts/" ~ (a.run_id | urlencode) ~ "/" ~ (a.flow_uid | urlencode | replace('%2F', '/')) ~ "/probs" %}
-        <tr data-flow="{{ a.flow_uid }}"{% if a.reversed %} data-reversed="1"{% endif %}>
+        {% if a.kind == 'window' %}
+        {% set w = a.window %}
+        <tr data-flow="{{ a.flow_uid }}" data-kind="window" class="window-alert">
           <td class="time">{{ a.first_seen_ms | utc_ms }}</td>
+          <td><span class="badge window">окно</span></td>
+          <td class="ip">{{ a.attacker_ip or a.src_ip }}</td>
+          <td class="ip">{{ w.targets | length if w else '—' }} целей</td>
+          <td>—</td>
+          <td>{{ a.predicted_class }}</td>
+          <td class="num">{{ '%.3f' | format(a.attack_score) }}</td>
+          {# «Ок», а не «О»: моноширинная кириллическая О неотличима от нуля, и столбец
+             читался как «эксперты: 0» #}
+          <td class="experts-short" title="эксперт окон">Ок</td>
+          <td>
+            <details class="window-details">
+              <summary>окно</summary>
+              {% if w %}
+              <dl class="facts window-facts">
+                <div><dt>Интервал окна (UTC)</dt><dd class="time">{{ w.start_ms | utc_ms }} — {{ w.end_ms | utc_ms }}</dd></div>
+                <div><dt>Потоков в окне</dt><dd class="num">{{ w.n_flows }}{% if w.truncated %} <span class="badge warn" title="нейросеть видит только первые {{ w.seq_max }} потоков окна">усечено до {{ w.seq_max }}</span>{% endif %}</dd></div>
+                <div><dt>Портов назначения</dt><dd class="num">{{ w.n_dst_ports }}</dd></div>
+                <div><dt>Эксперт окон</dt><dd><code>{{ w.kind }} {{ w.expert_version }}</code></dd></div>
+                <div class="wide"><dt>Цели ({{ w.targets | length }})</dt><dd class="ip">{% for t in w.targets[:10] %}{{ t.ip }} ({{ t.n }}){% if not loop.last %}, {% endif %}{% endfor %}{% if w.targets | length > 10 %} … ещё {{ w.targets | length - 10 }}{% endif %}</dd></div>
+              </dl>
+              {% if a.explanation %}<p class="explanation">{{ a.explanation }}</p>{% endif %}
+              {% if w.top_features %}
+              <table class="window-features">
+                <caption>Самые влиятельные признаки окна</caption>
+                <thead><tr><th scope="col">признак</th><th scope="col">значение</th><th scope="col">вклад</th></tr></thead>
+                <tbody>
+                  {% for f in w.top_features %}
+                  <tr><td><code>{{ f.name }}</code></td><td class="num">{{ '—' if f.value is none else '%.4g' | format(f.value) }}</td><td class="num">{{ '%+.3f' | format(f.contribution) }}</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              {% endif %}
+              {% if w.top_flows %}
+              <table class="window-flows">
+                <caption>Самые подозрительные потоки окна (до 20)</caption>
+                <thead><tr><th scope="col">поток</th><th scope="col">цель</th><th scope="col">порт</th><th scope="col">протокол</th><th scope="col">скор потоковой модели</th></tr></thead>
+                <tbody>
+                  {% for f in w.top_flows %}
+                  <tr><td><code>{{ f.flow_uid }}</code></td><td class="ip">{{ f.dst_ip }}</td><td class="num">{{ f.dst_port if f.dst_port is not none else '—' }}</td><td>{{ f.protocol | proto }}</td><td class="num">{{ '—' if f.flow_score is none else '%.3f' | format(f.flow_score) }}</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              {% endif %}
+              {% else %}
+              <p class="muted">Описание окна не сохранено.</p>
+              {% endif %}
+            </details>
+          </td>
+        </tr>
+        {% else %}
+        {% set probs_url = "/fragments/alerts/" ~ (a.run_id | urlencode) ~ "/" ~ (a.flow_uid | urlencode | replace('%2F', '/')) ~ "/probs" %}
+        <tr data-flow="{{ a.flow_uid }}" data-kind="flow"{% if a.reversed %} data-reversed="1"{% endif %}>
+          <td class="time">{{ a.first_seen_ms | utc_ms }}</td>
+          <td><span class="badge flow">поток</span></td>
           <td class="ip">{{ a.src_ip }}:{{ a.src_port }}{% if a.reversed %} <span class="badge reversed" title="поток ответный: атакующая сторона — {{ a.attacker_ip }}">ответный</span>{% endif %}</td>
           <td class="ip">{{ a.dst_ip }}:{{ a.dst_port }}</td>
           <td>{{ a.protocol | proto }}</td>
@@ -38,13 +105,16 @@
             </details>
           </td>
         </tr>
+        {% endif %}
         {% endfor %}
       </tbody>
     </table>
   </div>
   <p class="legend muted">Эксперты: К — классификатор атак, А — детектор аномалий, К+А — оба,
-    М — ни один эксперт не превысил свой порог, алерт поднял мета-слой; «—» — прогон до ансамбля.
-    «Ответный» — поток записан от отвечающей стороны, атакующий — вторая сторона.</p>
+    М — ни один эксперт не превысил свой порог, алерт поднял мета-слой; Ок — эксперт окон;
+    «—» — прогон до ансамбля. «Ответный» — поток записан от отвечающей стороны, атакующий —
+    вторая сторона. Алерт окна — одна минута трафика одного атакующего, признанная атакой
+    целиком.</p>
   {{ pager(alerts.page, alerts.pages, alerts.href, alerts.hx, '#alerts') }}
   {% endif %}
 </div>

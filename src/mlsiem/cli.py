@@ -14,6 +14,8 @@ import contextlib
 import errno
 import logging
 import sys
+from datetime import UTC as _UTC
+from datetime import datetime as _dt
 from pathlib import Path
 
 log = logging.getLogger("mlsiem")
@@ -286,6 +288,171 @@ def cmd_detect_ensemble(args, cfg) -> int:
     return EXIT_OK
 
 
+def _soc_direction(args) -> str:
+    """Режим правила направления из конфига SOC: окна строятся по той же атакующей стороне,
+    что группировка инцидентов (R1), иначе окна обучения и цепочки разошлись бы."""
+    from mlsiem.soc.config import load_soc_config
+
+    return load_soc_config(args.soc_config).direction
+
+
+def cmd_detect_windows(args, cfg) -> int:
+    """Эксперимент 007: бустинг окон против нейросети окон против текущей модели (US1)."""
+    from mlsiem.detect.artifact import DetectorLoadError
+    from mlsiem.detect.windows_experiment import REPORT_NAME, TITLES, run_windows_experiment
+    from mlsiem.detect.windows_nn import NNUnavailable, torch_available
+
+    if not args.skip_nn and "gru" in cfg.candidates and not torch_available():
+        log.error(
+            "Нет PyTorch для нейросети окон — установите `uv sync --extra nn` или запустите "
+            "с --skip-nn"
+        )
+        return EXIT_ERROR
+    try:
+        exp = run_windows_experiment(
+            cfg,
+            device=args.device,
+            skip_nn=args.skip_nn,
+            output=Path(args.output) if args.output else None,
+            mlflow_dir=None if args.no_mlflow else Path(args.mlflow_dir),
+            data_dir=Path(args.data_dir),
+            reports_dir=Path(args.reports_dir),
+            direction=_soc_direction(args),
+        )
+    except NNUnavailable as exc:
+        log.error("Ошибка: %s", exc)
+        return EXIT_ERROR
+    except DetectorLoadError as exc:
+        log.error("Текущая модель или модель окон не загружается: %s", exc)
+        return EXIT_ERROR
+
+    def f(v) -> str:
+        return "—" if v is None or v != v else f"{v:.4f}"
+
+    w = exp["windows"]
+    _out(
+        f"Эксперимент окон на {exp['split']} (сид {exp['seed']}), версия {exp['window_version']}, "
+        f"устройство {exp['device']}"
+    )
+    _out(
+        f"  окон: train {w['train']['n_windows']} (обучение {w['train']['fit']}, хвост "
+        f"{w['train']['holdout']}), val {w['val']['n_windows']}, test {w['test']['n_windows']}; "
+        f"надёжные классы: {', '.join(exp['reliable_classes'])}"
+    )
+    _out(
+        f"  {'участник':<44} {'надёжных val':>12} {'атака/нет val':>13} {'надёжных test':>13} "
+        f"{'обучение, с':>11}"
+    )
+    for name, p in exp["participants"].items():
+        _out(
+            f"  {TITLES[name]:<44} {f(p['val']['macro_pr_auc_reliable']):>12} "
+            f"{f(p['val']['pr_auc_binary']):>13} {f(p['test']['macro_pr_auc_reliable']):>13} "
+            f"{p['train_seconds']:>11}"
+        )
+    sel = exp["selection"]
+    _out(f"Шаг 1: {sel['step1']['text']}")
+    _out(f"Шаг 2: {sel['step2']['text']}")
+    verdict = (
+        "кандидат прошёл выбор, ждёт аудита (`mlsiem detect windows-audit`)"
+        if exp["decision"]["passed_selection"]
+        else "отрицательный результат — цепочка не меняется"
+    )
+    _out(
+        f"Итог: {verdict}; всего {exp['seconds_total']} с, пиковая память "
+        f"{exp['peak_memory_mb']} МБ"
+    )
+    out = args.output or cfg.output
+    _out(f"Модель: {out}; отчёт: {Path(args.reports_dir) / REPORT_NAME}")
+    return EXIT_OK
+
+
+def cmd_detect_windows_audit(args, cfg) -> int:
+    """Проверка модели окон на артефакты и перенос (US2): вердикт и итоговое `accepted`."""
+    from mlsiem.detect.artifact import DetectorLoadError
+    from mlsiem.detect.windows_audit import REPORT_NAME, AuditInputMissing, run_windows_audit
+    from mlsiem.detect.windows_nn import NNUnavailable
+
+    try:
+        audit, card = run_windows_audit(
+            cfg,
+            model_dir=Path(args.model) if args.model else None,
+            data_dir=Path(args.data_dir),
+            device=args.device,
+            reports_dir=Path(args.reports_dir),
+            mlflow_dir=None if args.no_mlflow else Path(args.mlflow_dir),
+        )
+    except AuditInputMissing as exc:
+        log.error("Ошибка: %s", exc)
+        return EXIT_ERROR
+    except (DetectorLoadError, NNUnavailable) as exc:
+        log.error("Модель не загружается: %s", exc)
+        return EXIT_ERROR
+
+    def f(v) -> str:
+        return "—" if v is None or v != v else f"{v:.4f}"
+
+    d = card["decision"]
+    rt, tr = audit["retrain"], audit["transfer"]
+    _out(f"Аудит модели окон {audit['model']['kind']} {audit['model']['window_version']}")
+    _out(
+        f"  macro надёжных val: {f(audit['base']['macro_pr_auc_reliable_val'])}; без "
+        f"подозрительных ({len(rt['removed'])}): "
+        f"{f(rt.get('macro_pr_auc_reliable_val')) if rt['done'] else 'повтор не нужен'}; "
+        f"падение {rt['drop']:+.4f} (порог {audit['max_drop']})"
+    )
+    _out(
+        f"  перенос на {tr['split']} test: macro надёжных "
+        f"{f(tr['winner']['macro_pr_auc_reliable'])}, «атака/нет» "
+        f"{f(tr['winner']['pr_auc_binary'])} (с оговоркой о пересечении частей)"
+    )
+    _out(f"Вердикт: {audit['verdict']} — {audit['text']}")
+    _out(f"Итог: accepted = {str(d['accepted']).lower()}; {d['reason']}")
+    _out(f"Отчёт: {Path(args.reports_dir) / REPORT_NAME}")
+    return EXIT_OK
+
+
+def cmd_detect_windows_errors(args, cfg) -> int:
+    """Разбор ошибок модели окон рядом с моделью потоков (US4)."""
+    from mlsiem.detect.artifact import DetectorLoadError
+    from mlsiem.detect.windows_audit import (
+        ERRORS_REPORT_NAME,
+        AuditInputMissing,
+        run_windows_errors,
+    )
+
+    try:
+        err = run_windows_errors(
+            cfg,
+            model_dir=Path(args.model) if args.model else None,
+            part=args.part,
+            data_dir=Path(args.data_dir),
+            reports_dir=Path(args.reports_dir),
+        )
+    except AuditInputMissing as exc:
+        log.error("Ошибка: %s", exc)
+        return EXIT_ERROR
+    except DetectorLoadError as exc:
+        log.error("Модель не загружается: %s", exc)
+        return EXIT_ERROR
+
+    def f(v) -> str:
+        return "—" if v is None or v != v else f"{v:.4f}"
+
+    _out(
+        f"Разбор ошибок {err['model']['kind']} {err['model']['window_version']} на {err['part']}: "
+        f"окон {err['n_windows']}, атакующих {err['n_attack_windows']}, "
+        f"полнота {f(err['recall'])}, ложных на норме {err['false_alerts']}"
+    )
+    _out(f"  {'класс':<16} {'только окна':>11} {'только потоки':>13} {'обе':>6} {'никто':>6}")
+    for r in err["catch"]:
+        _out(
+            f"  {r['label']:<16} {r['only_windows']:>11} {r['only_flows']:>13} {r['both']:>6} "
+            f"{r['none']:>6}"
+        )
+    _out(f"Отчёт: {Path(args.reports_dir) / ERRORS_REPORT_NAME}")
+    return EXIT_OK
+
+
 EXPERT_TITLES = {
     "classifier": "классификатор",
     "anomaly": "детектор аномалий",
@@ -301,6 +468,8 @@ def _print_run_summary(s) -> None:
         by = ", ".join(f"{EXPERT_TITLES.get(k, k)} {v}" for k, v in s.alerts_by_expert.items())
         _out(f"  алертов по экспертам: {by} (алерт двух экспертов учтён у обоих)")
     _out(f"  ответных потоков среди алертов: {s.n_reversed} (направление: {s.direction_mode})")
+    if s.windows_line:
+        _out(f"  {s.windows_line}")
     if s.n_anomaly_incidents:
         _out(
             f"  инцидентов класса anomaly (класс атаки неизвестен): {s.n_anomaly_incidents} — "
@@ -347,6 +516,8 @@ def cmd_soc_run(args, cfg) -> int:
             model_dir=_model_dir(args),
             data_dir=Path(args.data_dir),
             limit=args.limit,
+            windows_mode=args.windows,
+            windows_model=Path(args.windows_model) if args.windows_model else None,
         )
     except ExtractError as exc:
         log.error("Ошибка извлечения потоков: %s", exc)
@@ -489,18 +660,28 @@ def cmd_soc_status(args, cfg) -> int:
 
 
 def cmd_stand_seed_iso(args, cfg) -> int:
-    """Seed-ISO автоустановки брокерной машины — только файл, система не меняется."""
-    from mlsiem.stand.seed import DEFAULT_PUBKEY, build_seed_iso, read_pubkey
+    """Seed-ISO автоустановки машины стенда по роли — только файл, система не меняется."""
+    from mlsiem.stand.seed import DEFAULT_PUBKEY, build_seed_iso, default_out, read_pubkey
 
+    role = args.role
     key = read_pubkey(Path(args.pubkey) if args.pubkey else DEFAULT_PUBKEY)
-    out = build_seed_iso(cfg, key, Path(args.out))
+    out = build_seed_iso(cfg, key, Path(args.out) if args.out else default_out(role), role=role)
     size_kb = out.stat().st_size / 1024
-    _out(f"Seed-ISO: {out} ({size_kb:.0f} КБ, метка тома CIDATA)")
-    _out(
-        f"  машина {cfg.stand.vm_name}: адрес {cfg.stand.broker_ip}/{cfg.stand.prefix}, "
-        f"Kafka {cfg.stand.kafka_version}, пользователь {cfg.stand.admin_user} (вход по ключу)"
-    )
-    _out("Дальше: stand/hyperv/20-vm-broker.ps1 -Iso <образ Ubuntu> (от администратора)")
+    _out(f"Seed-ISO ({role}): {out} ({size_kb:.0f} КБ, метка тома CIDATA)")
+    if role == "broker":
+        _out(
+            f"  машина {cfg.stand.vm_name}: адрес {cfg.stand.broker_ip}/{cfg.stand.prefix}, "
+            f"Kafka {cfg.stand.kafka_version}, пользователь {cfg.stand.admin_user} "
+            "(вход по ключу)"
+        )
+        _out("Дальше: stand/hyperv/20-vm-broker.ps1 -Iso <образ Ubuntu> (от администратора)")
+    else:
+        machine = getattr(cfg.lab, role)
+        _out(f"  машина {machine.vm}: адрес {machine.ip}/{cfg.lab.subnet.prefixlen} в сети стенда")
+        script = "40-vm-victim" if role == "victim" else "50-vm-attacker"
+        _out(
+            f"Дальше: stand/hyperv/{script}.ps1 -Iso <образ Ubuntu> -Seed {out} (от администратора)"
+        )
     return EXIT_OK
 
 
@@ -508,7 +689,12 @@ def cmd_stand_check(args, cfg) -> int:
     from mlsiem.stand.check import stand_check
     from mlsiem.stream import broker as broker_mod
 
-    report = stand_check(cfg, lambda: broker_mod.make_broker(cfg, "check"))
+    channel = None
+    if cfg.lab is not None:
+        from mlsiem.lab.channel import make_channel
+
+        channel = make_channel(cfg)
+    report = stand_check(cfg, lambda: broker_mod.make_broker(cfg, "check"), channel=channel)
     for line in report.lines:
         _out(line)
     for w in report.warnings:
@@ -627,6 +813,373 @@ def _load_soc_for_stream(args):
     return load_soc_config(args.soc_config)
 
 
+# ---------------------------------------------------------------- фича 006: группа lab
+
+
+def _lab_channel(cfg):
+    from mlsiem.lab.channel import make_channel
+
+    if cfg.lab is None:
+        log.error("в конфиге нет раздела lab — стенд описывается там (configs/stream.yaml)")
+        return None
+    return make_channel(cfg)
+
+
+def cmd_lab_scenario_list(args, cfg) -> int:
+    """Сценарии из конфига — без обращения к машинам (только чтение)."""
+    if cfg.lab is None:
+        log.error("в конфиге нет раздела lab")
+        return EXIT_ERROR
+    for sc in cfg.scenarios:
+        _out(
+            f"  {sc.name}@{sc.version}: {sc.tool} → {sc.target}, класс {sc.expected_class}, "
+            f"предел {sc.duration_limit_s} с"
+        )
+    if not cfg.scenarios:
+        _out("Сценариев в конфиге нет")
+    return EXIT_OK
+
+
+def cmd_lab_scenario_run(args, cfg) -> int:
+    """Запустить сценарий на атакующей машине через канал управления (R6)."""
+    from mlsiem.lab.channel import ChannelError
+
+    channel = _lab_channel(cfg)
+    if channel is None:
+        return EXIT_ERROR
+    try:
+        sc = cfg.scenario(args.name, args.version)
+        reply = channel.request(
+            {"cmd": "scenario", "name": sc.name, "version": sc.version},
+            timeout_s=sc.duration_limit_s + 30,
+        )
+    except ChannelError as exc:
+        log.error("Ошибка канала: %s", exc)
+        return EXIT_ERROR
+    if not reply.get("ok"):
+        rec = reply.get("record") or {}
+        _out(f"Сценарий {args.name}: отклонён — {rec.get('reject_reason') or reply.get('error')}")
+        return EXIT_ERROR
+    rec = reply["record"]
+    _out(f"Сценарий {rec['name']}@{rec['version']}: {rec['outcome']} (run_uid {rec['run_uid']})")
+    return EXIT_OK
+
+
+def cmd_lab_normal(args, cfg) -> int:
+    from mlsiem.lab.channel import ChannelError
+
+    channel = _lab_channel(cfg)
+    if channel is None:
+        return EXIT_ERROR
+    try:
+        reply = channel.request({"cmd": "normal", "action": args.action}, timeout_s=30)
+    except ChannelError as exc:
+        log.error("Ошибка канала: %s", exc)
+        return EXIT_ERROR
+    if not reply.get("ok"):
+        log.error("Ошибка: %s", reply.get("error"))
+        return EXIT_ERROR
+    _out(f"Фоновая норма: {'запущена' if args.action == 'start' else 'остановлена'}")
+    return EXIT_OK
+
+
+def _fetch_journal(channel):
+    from mlsiem.lab.channel import ChannelError
+
+    try:
+        reply = channel.request({"cmd": "journal"}, timeout_s=30)
+    except ChannelError as exc:
+        log.error("Ошибка канала: %s", exc)
+        return None
+    if not reply.get("ok"):
+        log.error("Ошибка: %s", reply.get("error"))
+        return None
+    return reply["records"]
+
+
+def cmd_lab_demo(args, cfg) -> int:
+    """Готовность стенда → контрольный сценарий → остальные → сводка (US3, FR-015)."""
+    from mlsiem.lab.channel import ChannelError
+
+    channel = _lab_channel(cfg)
+    if channel is None:
+        return EXIT_ERROR
+    order = ["control_replay"] + [
+        s.name for s in cfg.scenarios if s.name not in ("control_replay",)
+    ]
+    summary = []
+    for name in order:
+        try:
+            sc = cfg.scenario(name)
+        except Exception:  # noqa: BLE001 — нет такого сценария в конфиге, пропускаем
+            continue
+        try:
+            reply = channel.request(
+                {"cmd": "scenario", "name": sc.name, "version": sc.version},
+                timeout_s=sc.duration_limit_s + 30,
+            )
+        except ChannelError as exc:
+            log.error("Ошибка канала на %s: %s", name, exc)
+            return EXIT_ERROR
+        rec = reply.get("record") or {}
+        ok = reply.get("ok")
+        summary.append((name, rec.get("outcome", "?"), rec.get("run_uid")))
+        _out(f"  {name}: {rec.get('outcome', reply.get('error'))}")
+        if not ok and name == "control_replay":
+            log.error("Контрольный сценарий не выполнился — демо остановлено")
+            return EXIT_ERROR
+    _out("Сводка демо:")
+    for name, outcome, uid in summary:
+        _out(f"  {name}: {outcome} ({uid or '—'})")
+    _out("Инциденты смотрите в консоли: uv run mlsiem soc serve")
+    return EXIT_OK
+
+
+def cmd_lab_report(args, cfg) -> int:
+    """Отчёт по запуску сценария (FR-016): журнал забирается с машины, алерты — из хранилища."""
+    from mlsiem.lab import journal
+    from mlsiem.lab.report import report_md, run_report
+    from mlsiem.soc import store
+
+    channel = _lab_channel(cfg)
+    if channel is None:
+        return EXIT_ERROR
+    records = _fetch_journal(channel)
+    if records is None:
+        return EXIT_ERROR
+    try:
+        rec = journal.find(records, args.run)
+    except journal.JournalError as exc:
+        log.error("Ошибка: %s", exc)
+        return EXIT_ERROR
+    soc = _load_soc_for_stream(args)
+    run_id = store.session_run_id(_sensor_source_id(cfg))
+    conn = store.connect(soc.db)
+    try:
+        store.init_db(conn)
+        rep = run_report(conn, run_id, rec)
+    finally:
+        conn.close()
+    _out(report_md(rep))
+    return EXIT_OK
+
+
+def cmd_lab_dataset_build(args, cfg) -> int:
+    """Собрать размеченный набор стенда из записи сеанса и журнала (US4, R12)."""
+    import tempfile
+
+    from mlsiem.data.extract import extract_flows
+    from mlsiem.lab import journal
+    from mlsiem.lab.dataset import build_dataset
+
+    if not args.pcap:
+        log.error("нужен --pcap: запись сеанса сенсора (забирается с машины Copy-VMFile)")
+        return EXIT_ERROR
+    records = journal.read(args.journal) if args.journal else []
+    version = args.version or _dt.now(_UTC).strftime("%Y%m%dT%H%M%S")
+    out = Path(args.out) if args.out else Path("data/lab") / version
+    # Потоки экстрактором 001 — со всеми колонками схемы, включая ключевые (flow_uid нужен
+    # оценке для сортировки/соединения). Тот же код, что `soc run --pcap` → единство признаков
+    with tempfile.TemporaryDirectory(prefix="mlsiem-lab-ds-") as wd:
+        flows = extract_flows(Path(args.pcap), "lab-" + version, workdir=Path(wd)).df
+    report = build_dataset(flows, records, out, version, sources=[Path(args.pcap).name])
+    _out(f"Набор стенда: {out} ({report['total_flows']} потоков)")
+    _out(f"  классы: {report['by_class']}")
+    _out(
+        f"  ambiguous: {report['ambiguous']} ({report['ambiguous_share_of_scenarios'] * 100:.1f}%)"
+    )
+    return EXIT_OK
+
+
+def cmd_lab_evaluate(args, cfg) -> int:
+    """Оценка модели на наборе стенда: PR-AUC, поимка, FPR, разбор (US5, FR-022/FR-024)."""
+    import json as _json
+
+    import polars as pl
+
+    from mlsiem.detect.ensemble import load_model
+    from mlsiem.lab.evaluate import evaluate_dataset, write_report
+
+    dataset_dir = Path(args.dataset)
+    if not dataset_dir.exists():
+        dataset_dir = Path("data/lab") / args.dataset
+    flows_path = dataset_dir / "flows.parquet"
+    if not flows_path.exists():
+        log.error("нет набора %s (ожидался flows.parquet)", flows_path)
+        return EXIT_ERROR
+    labeled = pl.read_parquet(flows_path)
+    manifest = {}
+    man_path = dataset_dir / "manifest.json"
+    if man_path.exists():
+        manifest = _json.loads(man_path.read_text(encoding="utf-8"))
+    model = load_model(_model_dir(args))
+    catch = {sc.expected_class: sc.catch_threshold for sc in cfg.scenarios} if cfg.lab else {}
+    lossy = bool((manifest.get("sensor_losses") or {}).get("flows_dropped")) or bool(
+        (manifest.get("sensor_losses") or {}).get("packets_dropped")
+    )
+    report = evaluate_dataset(model, labeled, [], catch_thresholds=catch, lossy=lossy)
+    version = manifest.get("version") or dataset_dir.name
+    md, js = write_report(report, Path(args.reports_dir), version)
+    _record_lab_eval_mlflow(args, report, model, version)
+    _append_journal_eval(report, model, version)
+    _out(f"Оценка записана: {md}")
+    _out(
+        f"  PR-AUC macro {report['pr_auc_macro']}, «атака/нет» {report['pr_auc_attack']}, "
+        f"FPR норма {report['fpr_normal']}"
+    )
+    for u in report["unexplained"]:
+        _out(f"  не поймано {u['scenario_class']}: {u['reason']}")
+    return EXIT_OK
+
+
+def _record_lab_eval_mlflow(args, report, model, version) -> None:
+    """Запись версии модели/набора/метрик в MLflow (эксперимент lab). Сбой MLflow не валит
+    команду: отчёт на диске уже есть."""
+    try:
+        import mlflow
+
+        mlflow.set_tracking_uri(f"sqlite:///{Path(args.mlflow_dir) / 'mlflow.db'}")
+        mlflow.set_experiment("lab")
+        with mlflow.start_run(run_name=f"lab_eval_{version}"):
+            mlflow.log_params({"model_version": model.version, "dataset_version": version})
+            for k in ("pr_auc_macro", "pr_auc_attack", "fpr_normal", "threshold"):
+                if report.get(k) is not None:
+                    mlflow.log_metric(k, float(report[k]))
+    except Exception as exc:  # noqa: BLE001 — наблюдаемость не должна ронять оценку
+        log.warning("MLflow недоступен, метрики не записаны: %s", exc)
+
+
+def _append_journal_eval(report, model, version) -> None:
+    """Итог оценки — в docs/JOURNAL.md даже при плохом результате (FR-024, конституция VI)."""
+    path = Path("docs/JOURNAL.md")
+    if not path.exists():
+        return
+    line = (
+        f"\n### Оценка стенда {version} ({_dt.now(_UTC).date()})\n\n"
+        f"- модель {model.version}, порог {report['threshold']}\n"
+        f"- PR-AUC macro {report['pr_auc_macro']}, «атака/нет» {report['pr_auc_attack']}, "
+        f"FPR норма {report['fpr_normal']}, ложных инцидентов {report['false_incidents']}\n"
+    )
+    if report["unexplained"]:
+        line += (
+            "- не поймано: "
+            + "; ".join(f"{u['scenario_class']} — {u['reason']}" for u in report["unexplained"])
+            + "\n"
+        )
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def _sensor_source_id(cfg) -> str:
+    return cfg.lab.sensor.source_id if cfg.lab else "sensor:live"
+
+
+def cmd_stream_sensor_start(args, cfg) -> int:
+    """Живой сенсор: слушает интерфейс зеркала, шлёт потоки в брокер как sensor:live (US2)."""
+    import signal
+
+    from mlsiem.soc import store
+    from mlsiem.stream import broker as broker_mod
+    from mlsiem.stream.sensor import flows_from_pcap, iter_live_flows, run_sensor
+
+    if cfg.lab is None:
+        log.error("в конфиге нет раздела lab — сенсор описывается там (configs/stream.yaml)")
+        return EXIT_ERROR
+    iface = args.iface or cfg.lab.sensor.iface
+    soc = _load_soc_for_stream(args)
+    conn = store.connect(soc.db)
+    stopping = {"flag": False}
+
+    def on_sigint(signum, frame):
+        stopping["flag"] = True
+        log.info("Останавливаю сенсор: досылаю буфер и завершаю…")
+
+    previous = signal.signal(signal.SIGINT, on_sigint)
+    broker = broker_mod.make_broker(cfg, "sensor")
+    try:
+        store.init_db(conn)
+        broker.ping()
+        flows = flows_from_pcap(Path(args.pcap)) if args.pcap else iter_live_flows(iface)
+        src = f"запись {Path(args.pcap).name}" if args.pcap else f"интерфейс {iface}"
+        log.info(
+            "Сенсор: %s → брокер %s (источник %s)",
+            src,
+            cfg.broker.bootstrap,
+            _sensor_source_id(cfg),
+        )
+        summary = run_sensor(
+            cfg, conn, broker, flows, stop=lambda: stopping["flag"], on_report=log.info
+        )
+    except broker_mod.BrokerUnavailable as exc:
+        log.error("Ошибка: %s", exc)
+        return EXIT_ERROR
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        broker.close()
+        conn.close()
+    _out(
+        f"Сенсор остановлен: потоков {summary.counters.flows_sent} из "
+        f"{summary.counters.flows_seen}, потери {summary.counters.flows_dropped} потоков / "
+        f"{summary.counters.packets_dropped} пакетов"
+        + (" (сеанс с потерями)" if summary.lossy else "")
+    )
+    return EXIT_OK
+
+
+def cmd_stream_sensor_status(args, cfg) -> int:
+    from mlsiem.soc import store
+    from mlsiem.stream.stats import status_report
+
+    soc = _load_soc_for_stream(args)
+    source_id = _sensor_source_id(cfg)
+    conn = store.connect(soc.db)
+    try:
+        store.init_db(conn)
+        rep = status_report(conn, cfg)
+    finally:
+        conn.close()
+    sessions = [s for s in rep["sessions"] if s["source_id"] == source_id]
+    if not sessions:
+        _out(f"Сеанса сенсора ({source_id}) ещё не было")
+        return EXIT_OK
+
+    def f(x, fmt="{:.0f}"):
+        return "—" if x is None else fmt.format(x)
+
+    for s in sessions:
+        _out(f"Сенсор {s['source_id']} ({s['status']}): потоков {s['processed']}")
+        _out(
+            f"  {f(s['packets_per_s'])} пак/с, {f(s['flows_per_s'], '{:.1f}')} пот/с, потери "
+            f"{f(s['drops'])}, буфер {f(s['buffer_fill'], '{:.0%}')}, живость "
+            f"{'да' if s['liveness'] else 'нет'}" + (", СЕАНС С ПОТЕРЯМИ" if s["lossy"] else "")
+        )
+    return EXIT_OK
+
+
+def cmd_stream_sensor_stop(args, cfg) -> int:
+    """Завершить сеанс сенсора: как stream close для sensor:live."""
+    from mlsiem.soc import store
+
+    soc = _load_soc_for_stream(args)
+    source_id = _sensor_source_id(cfg)
+    run_id = store.session_run_id(source_id)
+    conn = store.connect(soc.db)
+    try:
+        store.init_db(conn)
+        run = store.session_by_source(conn, source_id)
+        if run is None:
+            _out(f"Сеанса сенсора ({source_id}) ещё не было")
+            return EXIT_OK
+        if run["status"] == "completed":
+            _out(f"Сеанс сенсора {run_id} уже завершён")
+            return EXIT_OK
+        store.set_session_status(conn, run_id, "completed", "закрыт командой stream sensor stop")
+    finally:
+        conn.close()
+    _out(f"Сеанс сенсора {run_id} завершён")
+    return EXIT_OK
+
+
 def cmd_stream_consume(args, cfg) -> int:
     import signal
 
@@ -658,6 +1211,8 @@ def cmd_stream_consume(args, cfg) -> int:
             once=args.once,
             stop=lambda: stopping["flag"],
             on_report=log.info,
+            windows_mode=args.windows,
+            windows_model=Path(args.windows_model) if args.windows_model else None,
         )
     except store.LeaseHeld as exc:
         log.error("Ошибка: %s", exc.message)
@@ -720,6 +1275,11 @@ def cmd_stream_status(args, cfg) -> int:
             f"{s['rejected']}, опоздавших {s['late']}; последняя активность "
             f"{s['last_activity_at']}"
         )
+        if s.get("windows_enabled"):
+            _out(
+                f"    окна: открыто {s['n_open_windows']}, закрыто {s['n_windows_closed']}, "
+                f"алертов {s['n_window_alerts']}, опоздавших-вне-окна {s['n_window_late_dropped']}"
+            )
     return EXIT_OK
 
 
@@ -741,6 +1301,13 @@ def cmd_stream_close(args, cfg) -> int:
         if run["status"] == "completed":
             _out(f"Сеанс {args.session} уже завершён")
             return EXIT_OK
+        # Фича 007: перед завершением — закрыть открытые окна сеанса (вердикты и алерты окон
+        # пишутся, как при отметке end)
+        from mlsiem.stream.windows_online import close_session_windows
+
+        closed = close_session_windows(conn, soc, args.session)
+        if closed["n_windows"]:
+            _out(f"Закрыто окон: {closed['n_windows']}, алертов окон: {closed['n_window_alerts']}")
         store.set_session_status(
             conn, args.session, "completed", "закрыт командой mlsiem stream close"
         )
@@ -803,6 +1370,12 @@ def _load_detect_config(args):
     return load_detect_config(args.config)
 
 
+def _load_windows_config(args):
+    from mlsiem.detect.windows import load_windows_config
+
+    return load_windows_config(args.config)
+
+
 def _load_ensemble_config(args):
     from mlsiem.detect.config import load_ensemble_config
 
@@ -822,6 +1395,17 @@ def _model_args(p: argparse.ArgumentParser) -> None:
         "по умолчанию models/ensemble, если он обучен, иначе models/detector",
     )
     p.add_argument("--detector", help="синоним --model (совместимость с 002/003)")
+
+
+def _windows_args(p: argparse.ArgumentParser) -> None:
+    """Флаги эксперта окон (фича 007) у `soc run` и `stream consume`."""
+    p.add_argument(
+        "--windows",
+        choices=["auto", "off", "force"],
+        help="эксперт окон: auto — только принятая модель (по умолчанию из soc.yaml), off — "
+        "как в 005, force — включить и непринятую (для проверки интеграции)",
+    )
+    p.add_argument("--windows-model", help="каталог модели окон (по умолчанию windows.model)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -899,6 +1483,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_detect_ensemble, load_config=_load_ensemble_config)
 
+    p = sub.add_parser(
+        "windows", help="эксперимент 007: окна потоков — бустинг против нейросети (US1)"
+    )
+    p.add_argument("--config", default="configs/windows.yaml", help="конфиг эксперимента окон")
+    p.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "cpu"],
+        help="где обучать нейросеть: auto — видеокарта, если есть, иначе CPU",
+    )
+    p.add_argument("--skip-nn", action="store_true", help="без нейросети: бустинг и текущая модель")
+    p.add_argument("--output", help="куда сохранить модель окон (по умолчанию из конфига)")
+    p.add_argument("--no-mlflow", action="store_true", help="не писать запуски в MLflow")
+    p.add_argument("--reports-dir", default="reports", help="куда писать отчёт эксперимента")
+    p.add_argument("--mlflow-dir", default=".", help="где mlflow.db и mlruns/")
+    p.add_argument(
+        "--soc-config",
+        default="configs/soc.yaml",
+        help="конфиг SOC: режим правила направления (grouping.direction) — ключ окна",
+    )
+    p.set_defaults(func=cmd_detect_windows, load_config=_load_windows_config)
+
+    p = sub.add_parser(
+        "windows-audit", help="007: проверка модели окон на артефакты и перенос (US2)"
+    )
+    p.add_argument("--model", help="каталог модели окон (по умолчанию output из конфига)")
+    p.add_argument("--config", default="configs/windows.yaml", help="конфиг эксперимента окон")
+    p.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "cpu"],
+        help="где переобучать нейросеть при повторе без подозрительных признаков",
+    )
+    p.add_argument("--no-mlflow", action="store_true", help="не писать метрики аудита в MLflow")
+    p.add_argument("--reports-dir", default="reports", help="куда писать отчёт аудита")
+    p.add_argument("--mlflow-dir", default=".", help="где mlflow.db и mlruns/")
+    p.set_defaults(func=cmd_detect_windows_audit, load_config=_load_windows_config)
+
+    p = sub.add_parser("windows-errors", help="007: разбор ошибок модели окон (US4)")
+    p.add_argument("--model", help="каталог модели окон (по умолчанию output из конфига)")
+    p.add_argument("--config", default="configs/windows.yaml", help="конфиг эксперимента окон")
+    p.add_argument("--part", default="test", choices=["train", "val", "test"], help="часть")
+    p.add_argument("--reports-dir", default="reports", help="куда писать отчёт разбора")
+    p.set_defaults(func=cmd_detect_windows_errors, load_config=_load_windows_config)
+
     soc = groups.add_parser("soc", help="инциденты, реагирование и API аналитика (фича 002)")
     soc.add_argument("--config", default="configs/soc.yaml", help="конфиг SOC")
     soc.set_defaults(load_config=_load_soc_config)
@@ -909,6 +1538,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pcap", help="новый неразмеченный PCAP вместо разбиения")
     p.add_argument("--limit", type=int, help="взять только первые N потоков по времени")
     p.add_argument("--data-dir", default="data", help="где лежат потоки и разбиения 001")
+    _windows_args(p)
     _model_args(p)
     p.set_defaults(func=cmd_soc_run)
     p = sub.add_parser("serve", help="поднять консоль и API аналитика на 127.0.0.1")
@@ -935,7 +1565,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "seed-iso", help="собрать seed-ISO автоустановки Ubuntu с Kafka (только файл)"
     )
-    p.add_argument("--out", default="var/stand/seed.iso", help="куда записать образ")
+    p.add_argument(
+        "--role",
+        choices=("broker", "victim", "attacker"),
+        default="broker",
+        help="какая машина: брокер (005), жертва или атакующий (006)",
+    )
+    p.add_argument("--out", help="куда записать образ (по умолчанию var/stand/seed[-<роль>].iso)")
     p.add_argument("--pubkey", help="открытый SSH-ключ хоста (по умолчанию ~/.ssh/id_ed25519.pub)")
     p.set_defaults(func=cmd_stand_seed_iso)
     p = sub.add_parser("check", help="проверить с хоста брокер, топики и изоляцию сети стенда")
@@ -964,6 +1600,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("consume", help="онлайн-цепочка: сообщения → инциденты в SQLite")
     _model_args(p)
     p.add_argument("--once", action="store_true", help="обработать всё доступное и выйти")
+    _windows_args(p)
     p.set_defaults(func=cmd_stream_consume)
     p = sub.add_parser("status", help="показатели потока: брокер, потребитель, сеансы")
     p.set_defaults(func=cmd_stream_status)
@@ -975,6 +1612,62 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch", required=True, help="run_id пакетного прогона (`soc run`)")
     p.add_argument("--reports-dir", default="reports", help="куда писать отчёт сравнения")
     p.set_defaults(func=cmd_stream_compare)
+    # ---- фича 006: живой сенсор
+    p = sub.add_parser("sensor", help="живой сенсор: трафик стенда → потоки в брокер (006)")
+    ssub = p.add_subparsers(dest="sensor_command", required=True)
+    sp = ssub.add_parser("start", help="запустить живой захват на интерфейсе зеркала")
+    sp.add_argument("--iface", help="интерфейс-приёмник зеркала (по умолчанию из lab.sensor.iface)")
+    sp.add_argument("--pcap", help="вместо живого захвата проиграть запись (отладка/демо)")
+    sp.set_defaults(func=cmd_stream_sensor_start)
+    sp = ssub.add_parser(
+        "status", help="показатели живого сенсора (== stream status для sensor:live)"
+    )
+    sp.set_defaults(func=cmd_stream_sensor_status)
+    sp = ssub.add_parser("stop", help="завершить сеанс сенсора (как stream close)")
+    sp.set_defaults(func=cmd_stream_sensor_stop)
+
+    # ---- фича 006: группа lab (сценарии, норма, набор, оценка)
+    lab = groups.add_parser("lab", help="лабораторный стенд 006: сценарии, норма, набор, оценка")
+    lab.add_argument("--config", default="configs/stream.yaml", help="конфиг потока и стенда")
+    lab.add_argument("--soc-config", default="configs/soc.yaml", help="конфиг SOC (база, окно)")
+    lab.set_defaults(load_config=_load_stream_config)
+    lsub = lab.add_subparsers(dest="command", required=True)
+
+    sc = lsub.add_parser("scenario", help="сценарии атак: список и запуск")
+    scsub = sc.add_subparsers(dest="scenario_command", required=True)
+    q = scsub.add_parser("list", help="сценарии из конфига (без обращения к машинам)")
+    q.set_defaults(func=cmd_lab_scenario_list)
+    q = scsub.add_parser("run", help="запустить сценарий на атакующей машине (через канал)")
+    q.add_argument("name", help="имя сценария (lab scenario list)")
+    q.add_argument("--version", help="версия сценария (по умолчанию любая)")
+    q.set_defaults(func=cmd_lab_scenario_run)
+
+    q = lsub.add_parser("normal", help="фоновая норма: start | stop")
+    q.add_argument("action", choices=("start", "stop"))
+    q.set_defaults(func=cmd_lab_normal)
+
+    q = lsub.add_parser("demo", help="готовность → контрольный сценарий → остальные → сводка")
+    q.set_defaults(func=cmd_lab_demo)
+
+    q = lsub.add_parser("report", help="отчёт по запуску сценария (FR-016)")
+    q.add_argument("--run", required=True, help="run_uid запуска из журнала")
+    q.set_defaults(func=cmd_lab_report)
+
+    q = lsub.add_parser("dataset", help="собрать размеченный набор стенда")
+    dsub = q.add_subparsers(dest="dataset_command", required=True)
+    b = dsub.add_parser("build", help="запись сеанса + журнал → data/lab/<версия>/")
+    b.add_argument("--pcap", help="запись сеанса сенсора (Copy-VMFile с машины)")
+    b.add_argument("--journal", help="журнал сценариев (JSONL, забранный с машины)")
+    b.add_argument("--version", help="версия набора (по умолчанию метка времени)")
+    b.add_argument("--out", help="каталог набора (по умолчанию data/lab/<версия>)")
+    b.set_defaults(func=cmd_lab_dataset_build)
+
+    q = lsub.add_parser("evaluate", help="честная оценка модели на наборе стенда (FR-022)")
+    q.add_argument("--dataset", required=True, help="версия набора или путь к data/lab/<версия>")
+    q.add_argument("--model", help="каталог модели (по умолчанию ансамбль/детектор)")
+    q.add_argument("--reports-dir", default="reports", help="куда писать отчёт оценки")
+    q.add_argument("--mlflow-dir", default=".", help="где mlflow.db и mlruns/")
+    q.set_defaults(func=cmd_lab_evaluate)
     return parser
 
 

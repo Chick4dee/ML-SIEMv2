@@ -74,6 +74,11 @@ RUN_KEYS_002 = {
 # у пакетных прогонов они со значениями по умолчанию (batch/completed/null/0)
 RUN_KEYS_005 = {"mode", "status", "source_id", "last_activity_at"}
 CARD_KEYS_005 = {"merged_into", "alerts_after_decision", "first_after_decision_ms"}
+# Фича 007 (contracts/api-ui-additions.md): вид алерта и окно, число алертов окон у
+# инцидента, раздел «эксперт окон» у прогона — тоже только добавления
+ALERT_KEYS_007 = {"kind", "window"}
+CARD_KEYS_007 = {"n_window_alerts"}
+RUN_KEYS_007 = {"windows"}
 
 
 def _old_run(cfg) -> str:
@@ -144,7 +149,7 @@ def test_alert_fields_new_run(ens_client):
     inc = _first_incident(client, s.run_id)
     items = client.get(f"{API}/incidents/{inc['incident_id']}/alerts").json()["items"]
     for a in items:
-        assert set(a) == ALERT_KEYS_002 | ALERT_KEYS_004
+        assert set(a) == ALERT_KEYS_002 | ALERT_KEYS_004 | ALERT_KEYS_007
         assert isinstance(a["reversed"], bool)
         assert set(a["experts"]) == {"classifier", "anomaly"}
         assert isinstance(a["fired_experts"], list)
@@ -155,7 +160,7 @@ def test_alert_fields_new_run(ens_client):
 def test_alert_fields_old_run(ens_client):
     client, _ = ens_client
     (a,) = client.get(f"{API}/incidents/inc-old/alerts").json()["items"]
-    assert set(a) == ALERT_KEYS_002 | ALERT_KEYS_004
+    assert set(a) == ALERT_KEYS_002 | ALERT_KEYS_004 | ALERT_KEYS_007
     assert a["experts"] is None and a["fired_experts"] is None and a["explanation"] is None
     assert (a["attacker_ip"], a["victim_ip"], a["reversed"]) == (a["src_ip"], a["dst_ip"], False)
 
@@ -164,7 +169,7 @@ def test_experts_summary(ens_client):
     client, s = ens_client
     inc = _first_incident(client, s.run_id)
     card = client.get(f"{API}/incidents/{inc['incident_id']}").json()
-    assert CARD_KEYS_003 | {"experts_summary"} | CARD_KEYS_005 == set(card)
+    assert CARD_KEYS_003 | {"experts_summary"} | CARD_KEYS_005 | CARD_KEYS_007 == set(card)
     es = card["experts_summary"]
     assert es["available"] is True
     assert set(es["by_expert"]) <= {"classifier", "anomaly"}
@@ -179,7 +184,7 @@ def test_runs_model(ens_client):
     client, s = ens_client
     runs = {r["run_id"]: r for r in client.get(f"{API}/runs").json()["items"]}
     for r in runs.values():
-        assert RUN_KEYS_002 | {"model"} | RUN_KEYS_005 == set(r)
+        assert RUN_KEYS_002 | {"model"} | RUN_KEYS_005 | RUN_KEYS_007 == set(r)
     new = runs[s.run_id]["model"]
     assert new["kind"] == "ensemble" and new["selected"] == "ensemble:stack_logreg"
     assert set(new["experts"]) == {"classifier", "anomaly"}

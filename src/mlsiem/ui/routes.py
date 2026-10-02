@@ -293,24 +293,39 @@ def install(app: FastAPI, cfg: SocConfig, detector_dir: Path, stream_cfg=None) -
             headers=headers,
         )
 
-    def card_ctx(conn, incident_id: str, alerts_page: int = 1) -> dict:
-        card = views.incident_card(conn, cfg, incident_id, alerts_page)
+    def card_ctx(
+        conn, incident_id: str, alerts_page: int = 1, alerts_kind: str | None = None
+    ) -> dict:
+        card = views.incident_card(conn, cfg, incident_id, alerts_page, alerts_kind)
         return {**card, "run_id": card["inc"]["run_id"], "errors": {}, "values": {}}
 
     @router.get("/incidents/{incident_id}")
     def incident_page(request: Request, incident_id: str, conn=Depends(db)):
         page = request.query_params.get("alerts_page", "1")
         try:
-            ctx = card_ctx(conn, incident_id, int(page) if page.isdigit() else 1)
+            ctx = card_ctx(
+                conn,
+                incident_id,
+                int(page) if page.isdigit() else 1,
+                request.query_params.get("alerts_kind"),
+            )
         except store.NotFound as exc:
             return not_found(request, conn, exc.message)
         return render(request, conn, "incident.html", ctx)
 
     @router.get("/fragments/incidents/{incident_id}/alerts")
-    def alerts_fragment(request: Request, incident_id: str, page: int = 1, conn=Depends(db)):
+    def alerts_fragment(
+        request: Request,
+        incident_id: str,
+        page: int = 1,
+        kind: str | None = None,
+        conn=Depends(db),
+    ):
         try:
             inc = store.get_incident(conn, incident_id)
-            alerts = views.alerts_page_data(conn, cfg, incident_id, page)
+            alerts = views.alerts_page_data(
+                conn, cfg, incident_id, page, kind, n_window=inc["n_window_alerts"]
+            )
         except store.NotFound as exc:
             return not_found(request, conn, exc.message)
         ctx = {"inc": inc, "alerts": alerts, "run_id": inc["run_id"]}

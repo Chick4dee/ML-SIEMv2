@@ -18,6 +18,7 @@ Ubuntu Server ставится без вопросов, если рядом с �
 from __future__ import annotations
 
 import io
+import json
 import time as _time
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,6 +31,25 @@ from mlsiem.stream.broker import topic_specs
 REPO = Path(__file__).resolve().parents[3]
 TEMPLATES = REPO / "stand" / "broker"
 DEFAULT_OUT = Path("var/stand/seed.iso")
+ROLES = ("broker", "victim", "attacker")
+# Пакеты атакующей машины (R5): всё из репозиториев Ubuntu, без Metasploit и подобного
+ATTACKER_PACKAGES = (
+    "nmap",
+    "ffuf",
+    "hydra",
+    "slowhttptest",
+    "hping3",
+    "tcpreplay",
+    "curl",
+    "sshpass",
+    "bind9-dnsutils",
+    "python3",
+)
+# Модули раннера, которые копируются на атакующую машину как есть (только stdlib, R6) — тест
+# проверяет именно тот код, что поедет на машину
+RUNNER_MODULES = ("journal", "scenarios", "normal", "runner")
+LAB_SRC = Path(__file__).resolve().parents[1] / "lab"
+RUNNER_ROOT = "/opt/mlsiem/lib"
 DEFAULT_PUBKEY = Path.home() / ".ssh" / "id_ed25519.pub"
 VOLUME_ID = "CIDATA"
 # Фиксированная дата всех записей образа: 2026-01-01 00:00:00 UTC
@@ -75,6 +95,68 @@ def render(cfg, pubkey: str, templates: Path = TEMPLATES) -> dict[str, str]:
         "user-data": env.get_template("user-data.yaml.j2").render({**ctx, **parts}),
         "meta-data": env.get_template("meta-data.j2").render(ctx),
         **parts,
+    }
+
+
+def default_out(role: str) -> Path:
+    """Куда писать образ по умолчанию: брокер — как в 005, остальные — `seed-<роль>.iso`."""
+    return DEFAULT_OUT if role == "broker" else DEFAULT_OUT.with_name(f"seed-{role}.iso")
+
+
+def runner_files() -> list[dict]:
+    """Файлы раннера для атакующей машины: пакеты-заглушки и модули `mlsiem.lab.*`."""
+    files = [
+        {
+            "path": f"{RUNNER_ROOT}/mlsiem/__init__.py",
+            "text": "# заглушка: на машине только подпакет lab\n",
+        },
+        {
+            "path": f"{RUNNER_ROOT}/mlsiem/lab/__init__.py",
+            "text": (LAB_SRC / "__init__.py").read_text(encoding="utf-8"),
+        },
+    ]
+    for name in RUNNER_MODULES:
+        files.append(
+            {
+                "path": f"{RUNNER_ROOT}/mlsiem/lab/{name}.py",
+                "text": (LAB_SRC / f"{name}.py").read_text(encoding="utf-8"),
+            }
+        )
+    return files
+
+
+def render_role(cfg, role: str, pubkey: str, templates: Path = TEMPLATES) -> dict[str, str]:
+    """`user-data` и `meta-data` машины стенда (роль victim|attacker); для broker — `render`."""
+    if role == "broker":
+        return render(cfg, pubkey, templates)
+    if role not in ROLES:
+        raise SeedError(f"роль {role!r}: допустимы {', '.join(ROLES)}")
+    if cfg.lab is None:
+        raise SeedError("в конфиге нет раздела lab (машины стенда — configs/stream.yaml)")
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(str(templates)),
+        undefined=jinja2.StrictUndefined,
+        keep_trailing_newline=True,
+        autoescape=False,
+    )
+    lab_json = json.dumps(
+        {k: cfg.raw[k] for k in ("lab", "normal", "scenarios") if k in cfg.raw},
+        ensure_ascii=False,
+        indent=2,
+    )
+    ctx = {
+        "s": cfg.stand,
+        "lab": cfg.lab,
+        "pubkey": pubkey,
+        "role": role,
+        "vm": getattr(cfg.lab, role).vm,
+        "packages": ATTACKER_PACKAGES,
+        "runner_files": runner_files() if role == "attacker" else [],
+        "lab_json": lab_json,
+    }
+    return {
+        "user-data": env.get_template(f"user-data-{role}.yaml.j2").render(ctx),
+        "meta-data": env.get_template("meta-data-role.j2").render(ctx),
     }
 
 
@@ -135,9 +217,16 @@ def iso_bytes(files: dict[str, str]) -> bytes:
     return out.getvalue()
 
 
-def build_seed_iso(cfg, pubkey: str, out: Path = DEFAULT_OUT, templates: Path = TEMPLATES) -> Path:
-    """Собирает seed-ISO и пишет его атомарно; возвращает путь."""
-    rendered = render(cfg, pubkey, templates)
+def build_seed_iso(
+    cfg,
+    pubkey: str,
+    out: Path | None = None,
+    templates: Path = TEMPLATES,
+    role: str = "broker",
+) -> Path:
+    """Собирает seed-ISO роли (по умолчанию брокер, как в 005) и пишет его атомарно."""
+    out = default_out(role) if out is None else out
+    rendered = render_role(cfg, role, pubkey, templates)
     data = iso_bytes({"user-data": rendered["user-data"], "meta-data": rendered["meta-data"]})
     out = Path(out)
     with atomic_path(out) as tmp:

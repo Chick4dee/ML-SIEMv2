@@ -106,7 +106,9 @@ def test_migrate_v3_to_v4(tmp_path):
     before = _snapshot(conn)
 
     assert store.init_db(conn) is True
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION == 4
+    assert (
+        conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
+    )  # 007: до 5, не 4
 
     run = conn.execute("SELECT * FROM runs").fetchone()
     assert (run["mode"], run["status"], run["source_id"], run["last_activity_at"]) == (
@@ -200,7 +202,9 @@ def test_chain_from_002(tmp_path):
     store.append_audit(conn, "system", "run_loaded", run_id="r1", at="2026-01-01T00:00:00.000Z")
     audit = _rows(conn, "audit_log", "entry_id")
     assert store.init_db(conn) is True
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert (
+        conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
+    )  # 007: цепочка доходит до 5
     assert _rows(conn, "audit_log", "entry_id") == audit
     assert _names(conn, "table") >= STREAM_TABLES
     assert tuple(conn.execute("SELECT mode, status FROM runs").fetchone()) == ("batch", "completed")
@@ -210,14 +214,16 @@ def test_chain_from_v2(tmp_path):
     conn = store.connect(tmp_path / "soc.db")
     conn.executescript((FIXTURES / "soc_schema_v2.sql").read_text(encoding="utf-8"))
     assert store.init_db(conn) is True
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert (
+        conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
+    )  # 007: цепочка доходит до 5
     assert "late" in {r["name"] for r in conn.execute("PRAGMA table_info(alerts)")}
 
 
 def test_newer_refused(tmp_path):
     conn = store.connect(tmp_path / "future.db")
     store.init_db(conn)
-    conn.execute("PRAGMA user_version = 5")
+    conn.execute(f"PRAGMA user_version = {store.SCHEMA_VERSION + 1}")  # 007: 5 теперь своя
     with pytest.raises(store.SchemaTooNew, match="новее"):
         store.init_db(conn)
 

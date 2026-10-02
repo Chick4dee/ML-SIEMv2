@@ -87,17 +87,33 @@ def parse_adapters(data: Any) -> list[dict]:
                 "switch": a.get("SwitchName"),
                 "mac": a.get("MacAddress"),
                 "connected": a.get("Connected"),
+                # Фича 006: режим зеркалирования (None/Source/Destination)
+                "mirroring": a.get("PortMirroringMode"),
             }
         )
     return out
 
 
+def _is_sensor_adapter(a: dict, cfg) -> bool:
+    """Сенсорный адаптер брокерной машины (фича 006, R7): в сети стенда, без IP, приёмник
+    зеркала. Это единственное допустимое присутствие брокера в `mlsiem-lab` — зеркало
+    односторонне: сенсор слышит стенд, но своего адреса там не имеет (FR-006)."""
+    lab = getattr(cfg, "lab", None)
+    return (
+        lab is not None
+        and lab.sensor.placement == "broker"
+        and a.get("name") == "sensor"
+        and str(a.get("mirroring")) in ("Destination", "2")
+    )
+
+
 def check_isolation(adapters: list[dict], cfg) -> list[str]:
-    """Проблемы изоляции: адаптер машины брокера в сети стенда — брокер виден атакующему."""
+    """Проблемы изоляции: адаптер машины брокера в сети стенда — брокер виден атакующему
+    (кроме IP-less сенсорного адаптера-приёмника зеркала, фича 006)."""
     s = cfg.stand
     problems = []
     for a in adapters:
-        if a.get("switch") == s.lab_switch:
+        if a.get("switch") == s.lab_switch and not _is_sensor_adapter(a, cfg):
             problems.append(
                 f"брокер виден из сети стенда: у машины {s.vm_name} адаптер «{a.get('name')}» "
                 f"подключён к {s.lab_switch} — отключите его: "
@@ -168,8 +184,11 @@ def check_broker(cfg, broker_factory: Callable[[], Broker], report: CheckReport)
         broker.close()
 
 
-def stand_check(cfg, broker_factory: Callable[[], Broker], *, powershell=run_powershell):
-    """Полная проверка: адрес хоста, машина и её адаптеры, брокер и топики."""
+def stand_check(
+    cfg, broker_factory: Callable[[], Broker], *, powershell=run_powershell, channel=None
+):
+    """Полная проверка: адрес хоста, машина и её адаптеры, брокер и топики, а при поднятых
+    машинах стенда (фича 006) — и они (`stand.lab_check`)."""
     s = cfg.stand
     report = CheckReport()
     timeout = cfg.broker.connect_timeout_s
@@ -194,7 +213,8 @@ def stand_check(cfg, broker_factory: Callable[[], Broker], *, powershell=run_pow
         adapters = parse_adapters(
             powershell(
                 f"Get-VMNetworkAdapter -VMName '{s.vm_name}' -ErrorAction Stop | "
-                "Select-Object Name, SwitchName, MacAddress, Connected | ConvertTo-Json",
+                "Select-Object Name, SwitchName, MacAddress, Connected, PortMirroringMode "
+                "| ConvertTo-Json",
                 timeout,
             )
         )
@@ -213,4 +233,8 @@ def stand_check(cfg, broker_factory: Callable[[], Broker], *, powershell=run_pow
         )
 
     check_broker(cfg, broker_factory, report)
+    if getattr(cfg, "lab", None) is not None:
+        from mlsiem.stand.lab_check import lab_check
+
+        lab_check(cfg, report, channel=channel, powershell=powershell)
     return report

@@ -45,6 +45,18 @@
     <p class="muted">Прогон сделан до появления ансамбля — вклада экспертов нет.</p>
     {% endif %}
   </section>
+  {#- Фича 007: эксперт окон прогона — вид, версия и принят ли он -#}
+  {% set wb = d.windows %}
+  <section class="group model-box" id="run-windows" data-windows="{{ wb.state }}">
+    <h2>Эксперт окон: {{ wb.title }}</h2>
+    {% if wb.enabled %}
+    <ul class="counts">
+      <li data-counter="windows" data-count="{{ wb.n_windows }}">окон по {{ wb.length_s | round(0) | int }} с <strong>{{ wb.n_windows }}</strong></li>
+      <li data-counter="window_alerts" data-count="{{ wb.n_window_alerts }}">алертов окон <strong>{{ wb.n_window_alerts }}</strong></li>
+    </ul>
+    {% if wb.state == 'forced' %}<p class="warning">Эксперт окон включён принудительно (--windows force): модель не прошла выбор или аудит, её алерты — для проверки интеграции.</p>{% endif %}
+    {% endif %}
+  </section>
   <div class="groups">
     {{ group('По статусу', d.by_status, 'status') }}
     {{ group('По серьёзности', d.by_severity, 'severity') }}

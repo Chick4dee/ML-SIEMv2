@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Читает раздел stand из configs/stream.yaml и отдаёт его объектом PowerShell.
+    Читает разделы stand и lab из configs/stream.yaml и отдаёт его объектом PowerShell.
 
 .DESCRIPTION
     Все скрипты стенда берут имена машин, коммутаторов, адреса и ресурсы только отсюда —
@@ -29,6 +29,9 @@ out = dict(vars(cfg.stand))
 out['network'] = str(cfg.stand.network)
 out['bootstrap'] = cfg.broker.bootstrap
 out['connect_timeout_s'] = cfg.broker.connect_timeout_s
+# Фича 006: машины стенда и сенсор (раздел lab) — тем же объектом, как $cfg.lab.victim.vm
+if cfg.lab is not None:
+    out['lab'] = cfg.raw['lab']
 print(json.dumps(out))
 '@
 

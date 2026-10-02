@@ -120,7 +120,11 @@ bool. 62 = 58 признаков после `log1p` и стандартизац�
 
 - `window_pending(run_id, flow_uid, window_id, window_start_ms, attacker_ip, payload BLOB,
   PRIMARY KEY (run_id, flow_uid))` + индекс `(run_id, window_start_ms)`. `payload` — orjson
-  колонок, нужных `build_windows` (контекст + признаки эксперта окон).
+  колонок, нужных `build_windows` (контекст + признаки эксперта окон). С 2026-10-01 (T058)
+  это JSON-массив значений в порядке `payload_columns` (метка, если есть, — последней; её
+  видно по длине), а не словарь: имена полей больше не повторяются в каждом потоке, payload
+  сжался с ~2 КБ до ~0.5 КБ. Прежний словарь по-прежнему читается. Окна, открытые и закрытые
+  в одной пачке, в `window_pending` не пишутся вовсе.
 - `window_closed(run_id, window_id, closed_at, n_flows, PRIMARY KEY (run_id, window_id))`.
 
 **Переходы окна в сеансе**: *нет* → **открыто** (первый поток окна записан в `window_pending`) →

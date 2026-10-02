@@ -151,3 +151,67 @@ stages:
       - models/ensemble
       - reports/ensemble_experiment.md:
           cache: false
+
+  # Фича 007: детектор на окнах потоков (бустинг окон против нейросети окон против текущей
+  # модели). Сразу за экспериментом — аудит на артефакты: он переписывает решение в карточке
+  # models/windows/window_card.json, и если запускать его отдельно, выход стадии после
+  # аудита всегда отличался бы от записанного в dvc.lock. Режим направления окна берётся из
+  # configs/soc.yaml (grouping.direction) — поэтому он тоже в зависимостях.
+  # Нейросети нужен PyTorch: `uv sync --extra nn` (иначе эксперимент откажется запускаться).
+  # Запускать ТОЛЬКО `dvc repro --single-item train_windows`: models/detector и
+  # models/ensemble здесь — входы, а не то, что надо пересобирать. Без флага DVC увидит, что
+  # src/mlsiem/detect изменился с 002, удалит детектор и начнёт переобучать его (и ансамбль
+  # 004) — версии моделей под прогонами в базе поменяются.
+  train_windows:
+    cmd: uv run mlsiem detect windows && uv run mlsiem detect windows-audit
+    deps:
+      - data/flows/unsw
+      - data/splits/unsw_time.parquet
+      - data/splits/unsw_cross_day.parquet
+      - data/audit/unsw_time.parquet
+      - models/detector
+      - models/ensemble
+      - configs/soc.yaml
+      - src/mlsiem/detect/windows.py
+      - src/mlsiem/detect/windows_experiment.py
+      - src/mlsiem/detect/windows_expert.py
+      - src/mlsiem/detect/windows_nn.py
+      - src/mlsiem/detect/windows_audit.py
+    params:
+      - configs/windows.yaml:
+          - split
+          - transfer_split
+          - seed
+          - window
+          - current_model
+          - current_aggregate
+          - selection
+          - audit
+          - candidates
+          - output
+    outs:
+      - models/windows
+      - reports/windows_experiment.md:
+          cache: false
+      - reports/windows_audit.md:
+          cache: false
+
+  # Фича 006: размеченный набор стенда. Отдельный output data/lab — это ПЕРВЫЙ собственный
+  # набор проекта (benign/класс/ambiguous), собранный живым сенсором из записи сеанса и
+  # журнала сценариев. Он НЕ смешивается с UNSW/CTU-13 и не используется для обучения в 006.
+  #
+  # Запускать ТОЛЬКО `dvc repro --single-item lab_dataset` (как train_windows, инцидент 007):
+  # без флага DVC увидит, что src/mlsiem изменился, и каскадно перезапустит flows/train_* —
+  # версии моделей под прогонами в базе поменялись бы. Вход (pcap сеанса и журнал) приходит
+  # с машин стенда (Copy-VMFile) и в deps не указан: пересборка — по явной команде владельца.
+  lab_dataset:
+    cmd: uv run mlsiem lab dataset build --pcap var/lab/session.pcap --journal var/lab/journal.jsonl
+    deps:
+      - src/mlsiem/lab/dataset.py
+      - src/mlsiem/lab/journal.py
+      - src/mlsiem/stream/sensor.py
+      - src/mlsiem/data/extract.py
+      - src/mlsiem/data/schema.py
+    outs:
+      - data/lab:
+          persist: true

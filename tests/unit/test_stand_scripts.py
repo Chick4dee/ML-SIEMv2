@@ -13,8 +13,17 @@ from pathlib import Path
 import pytest
 
 HYPERV = Path(__file__).parents[2] / "stand" / "hyperv"
-# Скрипты только для чтения: проверка-план и чтение конфига
-READ_ONLY = {"00-check.ps1", "Read-StreamConfig.ps1"}
+# Скрипты, которые не меняют состояние хоста: проверка-план, чтение конфига и диспетчеры
+# команд в гостя/сенсор (фича 006) — им ShouldProcess не нужен, они ничего на хосте не создают
+READ_ONLY = {
+    "00-check.ps1",
+    "Read-StreamConfig.ps1",
+    "70-sensor.ps1",
+    "80-scenario.ps1",
+    "lib-com.ps1",
+}
+# Диспетчеры, которые адресуют машину параметром (-Vm) и не читают Read-StreamConfig.ps1
+NO_CONFIG = {"80-scenario.ps1", "lib-com.ps1"}
 CHANGING = re.compile(
     r"^\s*(New-VMSwitch|New-VM|New-NetIPAddress|Remove-VM|Remove-VMSwitch|Remove-NetIPAddress|"
     r"Set-VMNetworkAdapter|Add-VMNetworkAdapter|Rename-VMNetworkAdapter|"
@@ -40,6 +49,14 @@ def test_expected_scripts_exist():
         "30-post-install.ps1",
         "90-remove.ps1",
         "Read-StreamConfig.ps1",
+        # фича 006: машины стенда, сенсор, сценарии, удаление
+        "40-vm-victim.ps1",
+        "50-vm-attacker.ps1",
+        "45-post-install.ps1",
+        "60-sensor-adapter.ps1",
+        "70-sensor.ps1",
+        "80-scenario.ps1",
+        "91-remove-lab.ps1",
     } <= names
 
 
@@ -78,7 +95,7 @@ def test_no_hardcoded_stand_values(script):
     text = _text(script)
     for literal in LITERALS:
         assert literal not in text, f"{script.name}: {literal} — должно браться из конфига"
-    if script.name != "Read-StreamConfig.ps1":
+    if script.name != "Read-StreamConfig.ps1" and script.name not in NO_CONFIG:
         assert "Read-StreamConfig.ps1" in text
 
 

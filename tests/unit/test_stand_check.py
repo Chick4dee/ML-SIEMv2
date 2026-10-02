@@ -106,6 +106,8 @@ def test_full_check_with_fake_powershell(cfg, cluster):
             return [{"IPAddress": cfg.stand.host_ip, "PrefixLength": cfg.stand.prefix}]
         if "Get-VMNetworkAdapter" in command:
             return json.loads(ADAPTERS_OK)
+        if "Get-VM " in command:  # фича 006: машин стенда ещё нет
+            return []
         raise AssertionError(command)
 
     report = stand_check(cfg, _factory(cluster, cfg), powershell=ps)

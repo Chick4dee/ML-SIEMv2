@@ -83,3 +83,139 @@ stand:
   # не гарантирован. В кавычках: иначе YAML прочитал бы «чисто цифровой» MAC как число
   mgmt_mac: "00:15:5D:4D:00:10"
   install_mac: "00:15:5D:4D:00:11"
+
+# ----------------------------------------------------------------------------------------
+# Фича 006: лабораторный стенд и живой сенсор (`mlsiem stand …`, `mlsiem stream sensor …`,
+# `mlsiem lab …`). Контракт — specs/006-lab-stand-live-sensor/contracts/cli.md, решения —
+# research.md (R1–R18). Как и всё в этом файле, числа стенда живут только здесь.
+# ----------------------------------------------------------------------------------------
+
+lab:
+  # Подсеть сети стенда mlsiem-lab (Private, R2). Все цели сценариев обязаны лежать в ней
+  # (FR-013): так атака физически не может уйти за пределы стенда
+  subnet: 10.88.0.0/24
+  # Жертва: службы без данных владельца (R4). Адрес статический, по MAC (пересоздание ВМ
+  # не меняет адрес). ssh_user/ssh_password — тестовая учётка ТОЛЬКО для сценария перебора и
+  # нормы; пароль заведомо слабый и нужен лишь внутри изолированной сети стенда
+  victim:
+    vm: mlsiem-victim
+    ip: 10.88.0.20
+    services: [web, ssh, ftp, dns]
+    ssh_user: labuser
+    ssh_password: labpass123
+    memory_mb: 1024
+    cpus: 1
+    disk_gb: 10
+  # Атакующий: nmap, ffuf, hydra, slowhttptest, tcpreplay (R5). mgmt — канал управления с
+  # хоста (R6) без сети: com — именованный канал COM-порта ВМ (работает с Linux-гостем; по
+  # умолчанию), powershell-direct — Invoke-Command -VMName (только Windows-гости, оставлен
+  # по плану R6 на случай другого образа)
+  attacker:
+    vm: mlsiem-attacker
+    ip: 10.88.0.30
+    mgmt: com
+    memory_mb: 1024
+    cpus: 1
+    disk_gb: 10
+  # Сенсор (R7): процесс на брокерной машине (placement: broker) со вторым адаптером в
+  # mlsiem-lab без IP; vm — запасной вариант R7a (отдельная ВМ-сенсор). iface — интерфейс-
+  # приёмник зеркала в госте. buffer_flows — сколько завершённых потоков копить при
+  # недоступном брокере (R10): ~5 минут нормы стенда. pcap_limit_gb — предел записи сеанса
+  # (R12), на нём запись ротируется. report_interval_s — как часто писать показатели
+  sensor:
+    placement: broker
+    vm: mlsiem-sensor
+    iface: eth1
+    source_id: sensor:live
+    buffer_flows: 3000
+    pcap_limit_gb: 5
+    report_interval_s: 5
+    # Живость: сенсор «жив», если последний пакет был не раньше стольки секунд назад
+    liveness_s: 30
+    # Дополнительная память брокерной машине под сенсор (R7), МБ
+    extra_memory_mb: 1024
+  # Допустимое расхождение часов атакующего и сенсора, секунд (R13): больше — разметка набора
+  # по журналу сценариев ненадёжна, `stand check` сообщает проблему
+  clock_skew_max_s: 1
+  # Свободная память хоста, ниже которой `stand check` предупреждает (SC-009), ГБ
+  host_free_gb_min: 4
+  # Постоянные MAC адаптеров стенда (префикс Hyper-V 00:15:5D), как в разделе stand: по ним
+  # автоустановка отличает адаптеры; в кавычках, чтобы YAML не прочитал их как число
+  lab_mac:
+    victim: "00:15:5D:4D:00:20"
+    victim_install: "00:15:5D:4D:00:21"
+    attacker: "00:15:5D:4D:00:30"
+    attacker_install: "00:15:5D:4D:00:31"
+    sensor: "00:15:5D:4D:00:40"
+
+# Фоновая норма (R14, FR-019): обычный трафик к службам жертвы. Раннер на атакующей машине
+# каждые period_s секунд делает по одному «шагу» из mix — вес шага задаёт долю
+normal:
+  period_s: 5
+  mix:
+    web: 5
+    ssh: 1
+    ftp: 1
+    dns: 3
+  # Сколько секунд ждать ответ службы, прежде чем считать шаг неудачным
+  step_timeout_s: 10
+
+# Сценарии атак (R11, FR-012/013). version входит в журнал и манифест набора: другой сценарий
+# → другая версия. {target} подставляется адресом жертвы из lab.victim.ip, {port} — портом
+# службы; цель вне lab.subnet раннер отклоняет до запуска. expected_class — класс таксономии
+# UNSW или out_of_taxonomy (подбор паролей в UNSW 2015 нет); catch_threshold — доля потоков с
+# алертом, ниже которой отчёт оценки разбирает сценарий как «слабо пойманный» (R16)
+scenarios:
+  - name: control_replay
+    version: "1"
+    tool: tcpreplay
+    # Контрольный сценарий (R9): узнаваемый фрагмент UNSW с подменой адресов на адреса стенда.
+    # pcap — артефакт на атакующей машине; *_map — «адрес во фрагменте:адрес стенда» для
+    # tcprewrite --pnat (подменяются обе стороны потока, суммы пересчитываются). Адреса
+    # фрагмента — атакующий и жертва UNSW; новые обязаны лежать в lab.subnet (FR-013).
+    # tcpreplay идёт с исходными таймингами записи: так признаки потоков остаются узнаваемыми
+    pcap: /opt/mlsiem/control_replay.pcap
+    src_map: "175.45.176.1:10.88.0.30"
+    dst_map: "149.171.126.10:10.88.0.20"
+    args: "--intf1=lab0 {pcap}"
+    target: web
+    expected_class: generic
+    rate_limit: topspeed
+    duration_limit_s: 120
+    catch_threshold: 0.5
+  - name: port_scan
+    version: "1"
+    tool: nmap
+    args: "-sS -p 1-1024 -T4 {target}"
+    target: web
+    expected_class: reconnaissance
+    rate_limit: "T4"
+    duration_limit_s: 120
+    catch_threshold: 0.3
+  - name: web_fuzz
+    version: "1"
+    tool: ffuf
+    args: "-u http://{target}:{port}/FUZZ -w /usr/share/wordlists/common.txt -rate 200"
+    target: web
+    expected_class: fuzzers
+    rate_limit: "200 запросов/с"
+    duration_limit_s: 120
+    catch_threshold: 0.3
+  - name: ssh_bruteforce
+    version: "1"
+    tool: hydra
+    args: "-l {ssh_user} -P /usr/share/wordlists/pass.txt -t 4 ssh://{target}"
+    target: ssh
+    expected_class: out_of_taxonomy
+    rate_limit: "4 потока"
+    duration_limit_s: 120
+    catch_threshold: 0.3
+  - name: web_dos
+    version: "1"
+    tool: slowhttptest
+    args: "-c 400 -H -i 10 -r 100 -t GET -u http://{target}:{port}/ -l 60"
+    target: web
+    expected_class: dos
+    rate_limit: "100 соединений/с"
+    duration_limit_s: 90
+    catch_threshold: 0.3

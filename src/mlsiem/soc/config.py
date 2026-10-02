@@ -29,6 +29,9 @@ REFRESH_RANGE = (3, 300)
 # Как определять атакующую сторону потока (фича 004, research R8): auto — правилом по
 # TCP-флагам и портам самого потока, as_is — как в 002 (атакующий = src_ip)
 DIRECTION_MODES = ("auto", "as_is")
+# Фича 007: режимы эксперта окон в конфиге. force (включить непринятую модель) — только
+# флагом CLI, в конфиг его не пишут (research R12)
+WINDOWS_MODES = ("auto", "off")
 # Сети по умолчанию — если в конфиге (например, от фичи 002) нет раздела networks. Это
 # наблюдения прогона 002: оттуда пришли 17 из 66 «атак», на деле — ответные направления
 DEFAULT_NETWORKS: tuple[dict[str, Any], ...] = (
@@ -77,6 +80,19 @@ class UiConfig:
 
 
 @dataclass(frozen=True)
+class WindowsSocConfig:
+    """Раздел `windows` (фича 007): где модель окон и включать ли её.
+
+    `length_ms` необязателен: если задан, длина окна в карточке модели обязана с ним
+    совпадать — иначе прогон отказывается стартовать (оператор ждёт окна другой длины).
+    """
+
+    model: Path = Path("models/windows")
+    mode: str = "auto"
+    length_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class SocConfig:
     db: Path
     runs_dir: Path
@@ -91,6 +107,8 @@ class SocConfig:
     ui: UiConfig = dc_field(default_factory=UiConfig)
     # фича 004: режим определения атакующей стороны
     direction: str = "auto"
+    # фича 007: эксперт окон
+    windows: WindowsSocConfig = dc_field(default_factory=WindowsSocConfig)
 
 
 def _level(value: Any, key: str) -> str:
@@ -186,6 +204,29 @@ def _parse_ui(raw_ui: Any) -> UiConfig:
     return UiConfig(**values)
 
 
+def _parse_windows(raw_w: Any) -> WindowsSocConfig:
+    """Раздел windows необязателен: конфиги 002–005 его не знают — тогда auto и models/windows
+    (а без принятой модели auto и так ничего не включает)."""
+    if raw_w is None:
+        return WindowsSocConfig()
+    if not isinstance(raw_w, dict):
+        raise ConfigError("ключ windows: ожидался словарь {model, mode}")
+    mode = raw_w.get("mode", "auto")
+    if mode not in WINDOWS_MODES:
+        raise ConfigError(
+            f"ключ windows.mode: допустимы {list(WINDOWS_MODES)} (force — только флагом "
+            f"--windows force), а записано {mode!r}"
+        )
+    model = raw_w.get("model", "models/windows")
+    if not isinstance(model, str) or not model:
+        raise ConfigError(f"ключ windows.model: нужен путь к каталогу модели, а записано {model!r}")
+    length = raw_w.get("length_ms")
+    bad_length = isinstance(length, bool) or not isinstance(length, int) or length <= 0
+    if length is not None and bad_length:
+        raise ConfigError(f"ключ windows.length_ms: нужно целое > 0, а записано {length!r}")
+    return WindowsSocConfig(model=Path(model), mode=mode, length_ms=length)
+
+
 def parse_soc_config(raw: Any) -> SocConfig:
     if not isinstance(raw, dict):
         raise ConfigError("конфиг SOC: ожидался словарь верхнего уровня")
@@ -245,6 +286,7 @@ def parse_soc_config(raw: Any) -> SocConfig:
         networks=tuple(_parse_network(n, i) for i, n in enumerate(networks_raw)),
         ui=_parse_ui(raw.get("ui")),
         direction=direction,
+        windows=_parse_windows(raw.get("windows")),
     )
 
 

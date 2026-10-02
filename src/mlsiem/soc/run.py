@@ -15,6 +15,13 @@
 по атакующей стороне (`grouping.direction`, soc/direction.py). В БД прогон попадает
 одной транзакцией в самом конце; если что-то упало раньше, каталог прогона удаляется и в
 хранилище нет никаких следов.
+
+Фича 007: эксперт окон (research R12). Если он включён (`windows.mode` / `--windows`), после
+вердиктов потоков все потоки входа собираются в окна (`build_windows` — та же функция, что
+при обучении), эксперт выносит вердикт каждому окну, вердикты окон пишутся в
+`windows.parquet`, атакующие окна становятся алертами окон и группируются в инциденты ВМЕСТЕ
+с алертами потоков — по тем же правилам 002/004. Непринятая модель в режиме auto не
+включается: прогон ровно как в 005 (SC-008).
 """
 
 from __future__ import annotations
@@ -43,7 +50,10 @@ from mlsiem.soc.verdicts import (
     CONTEXT_COLUMNS,
     EXPLANATION,
     alerts_from_verdicts,
+    alerts_from_window_verdicts,
     compute_verdicts,
+    window_flow_context,
+    with_flow_kind,
 )
 
 log = logging.getLogger("mlsiem")
@@ -73,6 +83,9 @@ class RunSummary:
     n_reversed: int = 0
     n_anomaly_incidents: int = 0
     direction_mode: str = "auto"
+    # фича 007: эксперт окон (раздел summary.windows) и строка для сводки CLI
+    windows: dict = field(default_factory=dict)
+    windows_line: str = ""
 
 
 def parse_source(source: str) -> tuple[str, str]:
@@ -94,8 +107,25 @@ def _needed_columns(model: LoadedModel) -> list[str]:
     return cols
 
 
+def _read_columns(model: LoadedModel, windows_on: bool) -> list[str]:
+    """Что читать из parquet: поля модели и — если включён эксперт окон — все поля окон
+    (признаки схемы целиком: сводные признаки считаются по всем 58)."""
+    from mlsiem.detect.windows import flow_columns
+
+    cols = _needed_columns(model)
+    if windows_on:
+        cols += [c for c in flow_columns() if c not in cols]
+    return cols
+
+
 def load_split_flows(
-    split: str, part: str, model: LoadedModel, *, data_dir: Path, limit: int | None = None
+    split: str,
+    part: str,
+    model: LoadedModel,
+    *,
+    data_dir: Path,
+    limit: int | None = None,
+    windows_on: bool = False,
 ) -> tuple[pl.DataFrame, str | None]:
     """Потоки части разбиения + версия схемы их parquet. Метка берётся только для сводки."""
     files = flow_files(split, data_dir)
@@ -105,7 +135,9 @@ def load_split_flows(
             f"потоки разбиения {split} записаны разными версиями схемы: "
             f"{sorted(map(str, versions))}"
         )
-    lazy = scan_part(split, part, data_dir=data_dir, columns=[*_needed_columns(model), "label"])
+    lazy = scan_part(
+        split, part, data_dir=data_dir, columns=[*_read_columns(model, windows_on), "label"]
+    )
     if limit is not None:
         lazy = lazy.sort([FIRST, "flow_uid"]).head(limit)
     return lazy.collect(), versions.pop()
@@ -146,13 +178,46 @@ ALERT_ROW_COLUMNS = (
     "fired_experts",
     "experts",
     EXPLANATION,
+    # фича 007: вид алерта и описание окна
+    "alert_kind",
+    "window_info",
 )
+
+
+def window_stage(choice, flows: pl.DataFrame, verdicts: pl.DataFrame, direction: str):
+    """Эксперт окон на потоках входа: (результат, алерты окон) или (None, пустой кадр).
+
+    Окна строятся по ВСЕМ потокам (правило направления — для всех, не только алертов), как
+    при обучении: эксперт судит окно целиком (R12).
+    """
+    from mlsiem.detect.windows import SIDE_COLUMNS
+    from mlsiem.soc.direction import sides
+
+    if choice is None or choice.expert is None:
+        return None, pl.DataFrame()
+    side = sides(flows, direction).select(SIDE_COLUMNS)
+    result = choice.expert.verdicts(flows, side)
+    ctx = window_flow_context(flows, side, verdicts)
+    return result, alerts_from_window_verdicts(result, ctx, choice.expert)
+
+
+def windows_line(section: dict) -> str:
+    """Строка сводки CLI (contracts/cli.md): «окон: N, алертов окон: K (эксперт …)»."""
+    if not section.get("enabled"):
+        return f"эксперт окон: {section.get('reason', 'нет')}"
+    line = (
+        f"окон: {section.get('n_windows', 0)}, алертов окон: {section.get('n_window_alerts', 0)} "
+        f"(эксперт окон {section['kind']} {section['expert_version']})"
+    )
+    if section.get("mode") == "force" and not section.get("accepted"):
+        line += " — ВНИМАНИЕ: модель не принята, включена принудительно (--windows force)"
+    return line
 
 
 def alert_rows(alerts: pl.DataFrame) -> list[dict]:
     """Алерты (с incident_id) → строки для хранилища. Общая для пакетного прогона и
     потребителя 005: оба пишут алерты ровно теми же полями."""
-    return alerts.select(ALERT_ROW_COLUMNS).to_dicts()
+    return with_flow_kind(alerts).select(ALERT_ROW_COLUMNS).to_dicts()
 
 
 def alerts_by_expert(alerts: pl.DataFrame) -> dict[str, int]:
@@ -180,12 +245,18 @@ def run_chain(
     detector_dir: Path | None = None,
     data_dir: Path = Path("data"),
     limit: int | None = None,
+    windows_mode: str | None = None,
+    windows_model: Path | None = None,
 ) -> RunSummary:
     """Весь прогон одной командой. Возвращает сводку; состояние — в БД и `runs_dir/<run_id>/`.
 
     `model_dir` — каталог ансамбля или детектора 002; `detector_dir` — прежнее имя того же
     параметра (совместимость с 002/003). Без обоих — `models/detector`.
+    `windows_mode` — auto | off | force (по умолчанию из `windows.mode` конфига),
+    `windows_model` — каталог модели окон (по умолчанию `windows.model`).
     """
+    from mlsiem.detect.windows_expert import resolve_window_expert
+
     started_perf = time.perf_counter()
     started_at = store.now_iso()
     kind, rest = parse_source(source)
@@ -193,6 +264,10 @@ def run_chain(
     # 1. Модель и проверки — до любой обработки: при ошибке ничего не создано
     model = load_model(Path(model_dir or detector_dir or "models/detector"))
     check_model_classes(cfg, model.output_classes)
+    # Фича 007: эксперт окон и его проверки (длина окна, направление, классы) — тоже до
+    # обработки: при несовпадении с конфигом ничего не записано (код 1)
+    choice = resolve_window_expert(cfg, windows_mode, windows_model)
+    windows_on = choice.expert is not None
     if kind == "pcap":
         _check_pcap_path(Path(rest))
     conn = store.connect(cfg.db)
@@ -208,7 +283,7 @@ def run_chain(
                 raise ValueError(f"в источнике {source!r} нет части: ожидалось split:<имя>/<часть>")
             log.info("Загружаю потоки %s/%s…", split, part)
             flows, schema_version = load_split_flows(
-                split, part, model, data_dir=Path(data_dir), limit=limit
+                split, part, model, data_dir=Path(data_dir), limit=limit, windows_on=windows_on
             )
             model.check_input(schema_version, flows.columns)
             source_label = f"split:{split}/{part}"
@@ -237,9 +312,29 @@ def run_chain(
             verdicts.drop(EXPLANATION, strict=False).write_parquet(tmp)
 
         log.info("Группировка алертов в инциденты (направление: %s)…", cfg.direction)
-        alerts = alerts_from_verdicts(
-            verdicts, flows, experts_meta=model.experts_meta, direction=cfg.direction
+        alerts = with_flow_kind(
+            alerts_from_verdicts(
+                verdicts, flows, experts_meta=model.experts_meta, direction=cfg.direction
+            )
         )
+        windows_section = choice.summary()
+        result, window_alerts = window_stage(choice, flows, verdicts, cfg.direction)
+        if result is not None:
+            log.info(
+                "Эксперт окон: %d окон, %d алертов окон…",
+                result.windows.height,
+                window_alerts.height,
+            )
+            with atomic_path(run_dir / "windows.parquet") as tmp:
+                result.verdicts.write_parquet(tmp)
+            windows_section.update(
+                n_windows=result.windows.height,
+                n_window_alerts=window_alerts.height,
+                n_window_late_dropped=0,
+                n_open_windows=0,
+            )
+            if window_alerts.height:
+                alerts = pl.concat([alerts, window_alerts], how="diagonal_relaxed")
         alerts, incidents = group_alerts(
             alerts,
             window_ms=cfg.window_ms,
@@ -271,6 +366,8 @@ def run_chain(
             n_reversed=n_reversed,
             n_anomaly_incidents=sum(1 for i in incident_rows if i["attack_class"] == ANOMALY_CLASS),
             direction_mode=cfg.direction,
+            windows=windows_section,
+            windows_line=windows_line(windows_section),
         )
         if "true_label" in alerts.columns and alerts.height:
             true_attack = int((alerts["true_label"] != BENIGN).sum())
@@ -312,6 +409,8 @@ def run_chain(
                     "alerts_by_expert": by_expert,
                     "n_reversed": n_reversed,
                     "direction_mode": cfg.direction,
+                    # Фича 007: эксперт окон этого прогона (data-model «Прогон / сеанс»)
+                    "windows": windows_section,
                 },
                 "warnings": warnings,
             },

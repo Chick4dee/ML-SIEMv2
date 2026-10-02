@@ -20,4 +20,26 @@
     <div><dt>Алертов после решения</dt><dd class="num" data-stream="after-decision">{{ s.after_decision }}</dd></div>
     <div><dt>Последняя активность</dt><dd class="time" data-stream="activity">{{ s.last_activity_at | utc_iso }}</dd></div>
   </dl>
+  {% if s.sensor %}
+  {#- Фича 006: показатели живого сенсора (источник sensor:live). У источников 005 блока нет. -#}
+  <h3>Сенсор{% if s.lossy %} <span class="badge warn" data-stream="lossy">с потерями</span>{% endif %}</h3>
+  <dl class="facts" data-stream="sensor">
+    <div><dt>Пакетов в секунду</dt><dd class="num" data-stream="packets">{{ num(s.sensor.packets_per_s) }}</dd></div>
+    <div><dt>Потоков в секунду</dt><dd class="num" data-stream="sensor-flows">{{ num(s.sensor.flows_per_s, '%.1f') }}</dd></div>
+    <div><dt>Потери</dt><dd class="num" data-stream="drops">{{ num(s.sensor.drops) }}</dd></div>
+    <div><dt>Буфер отправки</dt><dd data-stream="buffer">{{ num((s.sensor.buffer_fill or 0) * 100, '%.0f', '%') }}</dd></div>
+    <div><dt>Живость</dt><dd data-stream="liveness">{% if s.sensor.liveness %}жив{% else %}<span class="badge warn">нет пакетов</span>{% endif %}</dd></div>
+  </dl>
+  {% endif %}
+  {% if s.windows %}
+  {#- Фича 007: окна сеанса — открыты (ждут водяного знака), закрыты, опоздавшие потоки,
+      пришедшие уже после закрытия своего окна (в окна не попали, алерты потоков — есть) -#}
+  <h3>Окна</h3>
+  <dl class="facts" data-stream="windows">
+    <div><dt>Открыто</dt><dd class="num" data-stream="open-windows">{{ s.windows.n_open_windows or 0 }}</dd></div>
+    <div><dt>Закрыто</dt><dd class="num" data-stream="closed-windows">{{ s.windows.n_windows or 0 }}</dd></div>
+    <div><dt>Алертов окон</dt><dd class="num" data-stream="window-alerts">{{ s.windows.n_window_alerts or 0 }}</dd></div>
+    <div><dt>Опоздавших вне окна</dt><dd class="num" data-stream="window-late">{{ s.windows.n_window_late_dropped or 0 }}</dd></div>
+  </dl>
+  {% endif %}
 </section>

@@ -27,6 +27,12 @@
 Единственность — аренда в SQLite (FR-019): второй потребитель при живой аренде не стартует;
 аренда продлевается каждые `lease_ttl_s / 6` с, а потерявший её потребитель останавливается,
 не записав больше ни одной пачки.
+
+Фича 007 (research R13): если включён эксперт окон, новые потоки пачки раскладываются по
+окнам (`WindowAssembler`), открытые окна копятся в `window_pending`, созревшие по водяному
+знаку закрываются, их алерты идут в тот же `plan_batch`, что алерты потоков, — и всё это
+пишется в ту же транзакцию, что позиция. Сеанс запоминает эксперт окон, с которым начат:
+перезапуск с другим — `ModelMismatch`, как для модели потоков.
 """
 
 from __future__ import annotations
@@ -47,7 +53,12 @@ from mlsiem.detect.ensemble import LoadedModel, load_model
 from mlsiem.soc import store
 from mlsiem.soc.config import SocConfig, check_model_classes
 from mlsiem.soc.run import alerts_by_expert
-from mlsiem.soc.verdicts import EXPLANATION, alerts_from_verdicts, compute_verdicts
+from mlsiem.soc.verdicts import (
+    EXPLANATION,
+    alerts_from_verdicts,
+    compute_verdicts,
+    with_flow_kind,
+)
 from mlsiem.stream.broker import Broker, BrokerUnavailable, Message
 from mlsiem.stream.incremental import mark_late, plan_batch
 from mlsiem.stream.messages import EndMark, decode_flows, rejected_payload
@@ -104,12 +115,30 @@ def default_holder() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
-def session_summary(model: LoadedModel, cfg: SocConfig) -> dict:
+def windows_section(choice) -> dict:
+    """Раздел `windows` сводки сеанса (фича 007): эксперт окон, с которым начат сеанс, и
+    счётчики окон. Путь к модели нужен `stream close` — закрыть окна без потребителя."""
+    if choice is None:
+        return {"mode": "off", "enabled": False, "reason": "выключен"}
+    out = choice.summary()
+    if choice.expert is not None:
+        out.update(
+            n_windows=0,
+            n_window_alerts=0,
+            n_window_late_dropped=0,
+            n_open_windows=0,
+            model_path=Path(choice.expert.path).as_posix() if choice.expert.path else None,
+        )
+    return out
+
+
+def session_summary(model: LoadedModel, cfg: SocConfig, windows_choice=None) -> dict:
     """Сводка нового сеанса — те же поля модели, что у пакетного прогона 004 (консоль
     показывает порог, классы, экспертов и режим направления)."""
     from mlsiem.data.schema import SCHEMA
 
     return {
+        "windows": windows_section(windows_choice),
         "schema_version": SCHEMA.version,
         "threshold": float(model.threshold),
         "classes": list(model.classes),
@@ -136,8 +165,14 @@ class Consumer:
         sleep: Callable[[float], None] = time.sleep,
         holder: str | None = None,
         on_report: Callable[[str], None] | None = None,
+        windows_mode: str | None = None,
+        windows_model: Path | None = None,
     ) -> None:
         self.cfg = stream_cfg
+        self.windows_mode = windows_mode
+        self.windows_model = windows_model
+        self.windows = None  # WindowsChoice фичи 007
+        self.assembler = None
         self.soc = soc_cfg
         self.broker = broker
         self.model_dir = Path(model_dir)
@@ -158,8 +193,17 @@ class Consumer:
 
     def start(self) -> None:
         """Модель и её проверки → база → аренда → позиции → подписка. До первого чтения."""
+        from mlsiem.detect.windows_expert import resolve_window_expert
+        from mlsiem.stream.windows_online import WindowAssembler
+
         self.model = load_model(self.model_dir)
         check_model_classes(self.soc, self.model.output_classes)
+        # Эксперт окон и его проверки — тоже до первого чтения (FR-013)
+        self.windows = resolve_window_expert(self.soc, self.windows_mode, self.windows_model)
+        if self.windows.expert is not None:
+            self.assembler = WindowAssembler(
+                self.windows.expert, self.soc.direction, self.cfg.consumer.allowed_lateness_ms
+            )
         self.conn = store.connect(self.soc.db)
         store.init_db(self.conn)
         store.acquire_lease(self.conn, self.holder, self.cfg.consumer.lease_ttl_s, now=self.clock())
@@ -261,8 +305,22 @@ class Consumer:
             self.on_report(
                 f"{st.run_id}: обработано {st.processed}, {snap['rate_per_s']:.0f} потоков/с, "
                 f"задержка p50 {_ms(p50)} / p95 {_ms(p95)}, отвергнуто {st.rejected}, "
-                f"опоздавших {snap['late']}"
+                f"опоздавших {snap['late']}" + self._windows_report(st.run_id)
             )
+
+    def _windows_report(self, run_id: str) -> str:
+        """«окна: открыто N, закрыто M, алертов K, опоздавших-вне-окна L» (contracts/cli.md)."""
+        if self.assembler is None or self.conn is None:
+            return ""
+        try:
+            w = (store.get_run(self.conn, run_id).get("summary") or {}).get("windows") or {}
+        except store.StoreError:
+            return ""
+        return (
+            f"; окна: открыто {w.get('n_open_windows', 0)}, закрыто {w.get('n_windows', 0)}, "
+            f"алертов {w.get('n_window_alerts', 0)}, опоздавших-вне-окна "
+            f"{w.get('n_window_late_dropped', 0)}"
+        )
 
     # ------------------------------------------------ пачка
 
@@ -361,7 +419,7 @@ class Consumer:
                 self.conn,
                 src,
                 model_version=self.model.version,
-                summary=session_summary(self.model, self.soc),
+                summary=session_summary(self.model, self.soc, self.windows),
             )
             log.info("Новый сеанс %s для источника %s", run["run_id"], src)
         if run["status"] == "completed":
@@ -378,6 +436,25 @@ class Consumer:
                 f"сеанс {run['run_id']} ({src}) начат моделью {run['model_version']}, а "
                 f"загружена {self.model.version} — сообщения источника не обрабатываю. Верните "
                 f"модель (--model) или закройте сеанс: mlsiem stream close --session "
+                f"{run['run_id']}"
+            )
+        mine = (run.get("summary") or {}).get("windows") or {"enabled": False}
+        want = windows_section(self.windows)
+        if bool(mine.get("enabled")) != bool(want.get("enabled")) or (
+            want.get("enabled") and mine.get("expert_version") != want.get("expert_version")
+        ):
+            have = mine.get("expert_version") if mine.get("enabled") else "без эксперта окон"
+            now = want.get("expert_version") if want.get("enabled") else "без эксперта окон"
+            store.set_session_status(
+                self.conn,
+                run["run_id"],
+                "stopped",
+                f"эксперт окон сеанса: {have}, а потребитель запущен: {now}",
+            )
+            raise ModelMismatch(
+                f"сеанс {run['run_id']} ({src}) начат с экспертом окон: {have}, а сейчас: {now} — "
+                "сообщения источника не обрабатываю. Верните прежний режим (--windows, "
+                "--windows-model) или закройте сеанс: mlsiem stream close --session "
                 f"{run['run_id']}"
             )
         if run["run_id"] not in self.summary.sessions:
@@ -421,6 +498,7 @@ class Consumer:
         late_by_uid = dict(zip(part["flow_uid"].to_list(), flags, strict=True))
 
         alerts = pl.DataFrame()
+        flows = verdicts = pl.DataFrame()
         if part.height:
             flows = part.drop(["source_id", "seq", "sent_at_ms"])
             if flows["label"].null_count() == flows.height:
@@ -466,12 +544,41 @@ class Consumer:
         sent_by_uid = dict(
             zip(part["flow_uid"].to_list(), part["sent_at_ms"].to_list(), strict=True)
         )
+        # Задержка «поток → алерт» — только у алертов потоков: алерт окна по определению ждёт
+        # закрытия окна (L + допустимое опоздание, SC-006), его задержка — отдельная мера
+        alert_sent_at = (
+            [sent_by_uid[u] for u in alerts["flow_uid"].to_list()] if alerts.height else []
+        )
+        summary_delta: dict = {
+            "alerts_by_expert": alerts_by_expert(alerts) if alerts.height else {},
+            "n_reversed": n_reversed,
+        }
+        window_plan = None
+        if self.assembler is not None:
+            window_plan = self.assembler.plan(
+                self.conn,
+                run_id,
+                flows,
+                verdicts,
+                watermark=max_seen,
+                close_all=status == "completed",
+            )
+            from mlsiem.stream.windows_online import write_window_part
+
+            first = min(offsets.values()) if offsets else 0
+            write_window_part(
+                self.soc.runs_dir, run_id, window_plan, f"{first:012d}-{part.height:05d}"
+            )
+            walerts = window_plan.alerts
+            if walerts.height:
+                alerts = pl.concat([with_flow_kind(alerts), walerts], how="diagonal_relaxed")
+                summary_delta["alerts_by_expert"] = alerts_by_expert(alerts)
+            summary_delta["windows"] = window_plan.counters()
         return {
             "run_id": run_id,
             "alerts": alerts,
-            "alert_sent_at": [sent_by_uid[u] for u in alerts["flow_uid"].to_list()]
-            if alerts.height
-            else [],
+            "window_plan": window_plan,
+            "alert_sent_at": alert_sent_at,
             "max_seen": stream.get("max_first_seen_ms"),
             "seen": seqs,
             "late_flows": sum(flags),
@@ -480,10 +587,7 @@ class Consumer:
                 "n_flows": part.height,
                 "stream": {"n_late": int(sum(flags)), "parts": 1 if part.height else 0},
                 "stream_set": stream_set,
-                "summary": {
-                    "alerts_by_expert": alerts_by_expert(alerts) if alerts.height else {},
-                    "n_reversed": n_reversed,
-                },
+                "summary": summary_delta,
                 "status": status,
                 "reason": reason,
             },
@@ -569,6 +673,7 @@ class Consumer:
                     seen={item["run_id"]: item["seen"] for item in prepared},
                     sessions={item["run_id"]: item["session"] for item in prepared},
                     stats=stats_rows,
+                    extra=[_window_writer(item["window_plan"]) for item in prepared],
                 )
                 return
             except store.Conflict as exc:
@@ -579,6 +684,17 @@ class Consumer:
                         f"аналитиков ({exc.message}) — позиция не подтверждена"
                     ) from exc
                 log.info("Конфликт с решением аналитика — пересчитываю план пачки: %s", exc.message)
+
+
+def _window_writer(plan):
+    """Запись плана окон сеанса внутри транзакции пачки (или ничего, если окон нет)."""
+    from mlsiem.stream.windows_online import apply_window_plan
+
+    def write(conn, at):
+        if plan is not None:
+            apply_window_plan(conn, plan, at)
+
+    return write
 
 
 def _ms(x: float | None) -> str:
@@ -596,6 +712,8 @@ def consume(
     clock: Callable[[], float] = time.time,
     holder: str | None = None,
     on_report: Callable[[str], None] | None = None,
+    windows_mode: str | None = None,
+    windows_model: Path | None = None,
 ) -> ConsumeSummary:
     """Запустить потребителя: проверки → цикл → остановка (сеансы `stopped`, аренда отдана)."""
     c = Consumer(
@@ -606,6 +724,8 @@ def consume(
         clock=clock,
         holder=holder,
         on_report=on_report,
+        windows_mode=windows_mode,
+        windows_model=windows_model,
     )
     try:
         c.start()

@@ -44,6 +44,11 @@
     <label><input type="radio" name="flagged" value="hide"{% if view.flagged == 'hide' %} checked{% endif %}> скрыть подозрительные</label>
   </fieldset>
 
+  <fieldset>
+    <legend>Эксперт окон</legend>
+    <label><input type="checkbox" name="windows" value="only"{% if view.windows %} checked{% endif %}> только с алертами окон</label>
+  </fieldset>
+
   {% if stream_run %}
   <fieldset>
     <legend>Поток</legend>

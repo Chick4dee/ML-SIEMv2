@@ -99,6 +99,56 @@ def lag_messages(ends: dict[int, int], positions: dict[int, int]) -> int:
     return sum(max(0, end - positions.get(p, 0)) for p, end in ends.items())
 
 
+@dataclass
+class SensorStatsWindow:
+    """Скользящее окно показателей живого сенсора (фича 006, research R17).
+
+    Считает пакеты/с и потоки/с за окно, отдаёт потери (накопленные), занятость буфера и
+    живость (был ли пакет не позже `liveness_s` назад). Пишется в `stream_stats` рядом с
+    показателями 005; для источников-проигрывателей эти поля остаются NULL.
+    """
+
+    liveness_s: float = 30.0
+    clock: Callable[[], float] = time.time
+    window_s: float = WINDOW_S
+    _packets: deque = field(default_factory=deque)  # (когда, пакетов)
+    _flows: deque = field(default_factory=deque)  # (когда, потоков)
+
+    def add(self, *, packets: int, flows: int) -> None:
+        now = self.clock()
+        self._packets.append((now, packets))
+        self._flows.append((now, flows))
+        self._trim(now)
+
+    def _trim(self, now: float) -> None:
+        edge = now - self.window_s
+        for dq in (self._packets, self._flows):
+            while dq and dq[0][0] < edge:
+                dq.popleft()
+
+    def _rate(self, dq: deque) -> float:
+        now = self.clock()
+        n = sum(k for _, k in dq)
+        span = (now - dq[0][0]) if dq else 0.0
+        return n / max(span, 1.0) if dq else 0.0
+
+    def snapshot(self, counters, *, buffer_fill: float) -> dict:
+        """Показатели сенсора для строки `stream_stats` (packets_per_s, flows_per_s, drops,
+        buffer_fill, liveness). `counters` — `stream.sensor.SensorCounters`."""
+        now = self.clock()
+        self._trim(now)
+        last = counters.last_packet_at
+        alive = last is not None and (now - last) <= self.liveness_s
+        return {
+            "packets_per_s": self._rate(self._packets),
+            "flows_per_s": self._rate(self._flows),
+            # Потери за сеанс (пакеты, не успетые захватом, + потоки, не влезшие в буфер)
+            "drops": counters.packets_dropped + counters.flows_dropped,
+            "buffer_fill": buffer_fill,
+            "liveness": 1 if alive else 0,
+        }
+
+
 def check_broker_state(stream_cfg, broker_factory: Callable[[], object] | None) -> dict:
     """Жив ли брокер и где концы партиций топика потоков. Без фабрики — «не проверялся»."""
     from mlsiem.soc import store
@@ -151,7 +201,13 @@ def status_report(
     sessions = []
     for run in store.list_sessions(conn):
         stats = store.latest_stats(conn, run["run_id"]) or {}
+        # Фича 006: показатели живого сенсора пишутся отдельными строками — берём последнюю,
+        # где они есть; флаг «с потерями» — из строки runs
+        sensor = store.latest_sensor_stats(conn, run["run_id"])
         stream = (run.get("summary") or {}).get("stream") or {}
+        # Фича 007: окна сеанса (только у сеанса с экспертом окон, иначе None)
+        win = (run.get("summary") or {}).get("windows") or {}
+        on = bool(win.get("enabled"))
         sessions.append(
             {
                 "run_id": run["run_id"],
@@ -170,6 +226,19 @@ def status_report(
                 "rate_per_s": stats.get("rate_per_s"),
                 "last_activity_at": run["last_activity_at"],
                 "end_received": bool(stream.get("end_received")),
+                "windows_enabled": on,
+                "n_open_windows": win.get("n_open_windows", 0) if on else None,
+                "n_windows_closed": win.get("n_windows", 0) if on else None,
+                "n_window_alerts": win.get("n_window_alerts", 0) if on else None,
+                "n_window_late_dropped": win.get("n_window_late_dropped", 0) if on else None,
+                # Фича 006: показатели живого сенсора (None у источников-проигрывателей 005)
+                "is_sensor": bool(sensor),
+                "lossy": bool(run.get("lossy")),
+                "packets_per_s": (sensor or {}).get("packets_per_s"),
+                "flows_per_s": (sensor or {}).get("flows_per_s"),
+                "drops": (sensor or {}).get("drops"),
+                "buffer_fill": (sensor or {}).get("buffer_fill"),
+                "liveness": (sensor or {}).get("liveness"),
             }
         )
     return {

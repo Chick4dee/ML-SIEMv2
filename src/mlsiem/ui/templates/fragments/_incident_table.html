@@ -56,6 +56,7 @@
             {{ flag_badges(i.flags) }}
             {% if i.alerts_after_decision %}<span class="badge after" title="новые алерты после решения аналитика">+{{ i.alerts_after_decision }} после решения</span>{% endif %}
             {% if i.merged_into %}<span class="badge merged">объединён с {{ i.merged_into }}</span>{% endif %}
+            {% if i.n_window_alerts %}<span class="badge window" title="в инциденте есть алерты эксперта окон">окна: {{ i.n_window_alerts }}</span>{% endif %}
           </td>
           <td class="ip targets">{{ long_list(i.targets) }}</td>
           <td class="num">{{ i.n_alerts }}</td>

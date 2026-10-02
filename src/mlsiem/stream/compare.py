@@ -15,7 +15,12 @@
   аналитик (FR-017);
 - `late_beyond_allowed` — в инциденте есть поток, опоздавший сильнее допустимого;
 - `decided_by_analyst` — предложение не пересчитывалось: решение уже принято (R9);
+- `window_late_dropped` (фича 007) — поток пришёл в уже закрытое окно (опоздал сильнее
+  допустимого) и в онлайне в окно не попал, а в пакете — попал;
 - `other` — необъяснённое. Результат «эквивалентно» — когда `other` нет вовсе.
+
+Фича 007 (research R16): дополнительно сравниваются вердикты окон (`windows.parquet` пакета
+против частей `windows/` сеанса) и в подписи инцидента — число алертов окон.
 """
 
 from __future__ import annotations
@@ -32,7 +37,12 @@ from mlsiem.soc import store
 
 FLOAT_TOL = 1e-9
 MAX_EXAMPLES = 20
-KNOWN_REASONS = ("merge_blocked_by_decision", "late_beyond_allowed", "decided_by_analyst")
+KNOWN_REASONS = (
+    "merge_blocked_by_decision",
+    "late_beyond_allowed",
+    "decided_by_analyst",
+    "window_late_dropped",
+)
 
 
 class CompareError(ValueError):
@@ -57,6 +67,34 @@ def batch_verdicts(runs_dir: Path, run_id: str) -> pl.DataFrame:
     if not path.exists():
         raise CompareError(f"у прогона {run_id} нет файла вердиктов {path}")
     return pl.read_parquet(path).sort("flow_uid")
+
+
+def session_windows(runs_dir: Path, run_id: str) -> pl.DataFrame:
+    """Вердикты окон сеанса — все файлы `windows/part-*.parquet` (фича 007)."""
+    files = sorted((Path(runs_dir) / run_id / "windows").glob("part-*.parquet"))
+    if not files:
+        return pl.DataFrame({"window_id": []}, schema={"window_id": pl.String})
+    return (
+        pl.concat([pl.read_parquet(f) for f in files], how="diagonal_relaxed")
+        .unique(subset="window_id", keep="first", maintain_order=True)
+        .sort("window_id")
+    )
+
+
+def batch_windows(runs_dir: Path, run_id: str) -> pl.DataFrame:
+    path = Path(runs_dir) / run_id / "windows.parquet"
+    if not path.exists():
+        return pl.DataFrame({"window_id": []}, schema={"window_id": pl.String})
+    return pl.read_parquet(path).sort("window_id")
+
+
+def _dropped_windows(conn, run_id: str) -> set[str]:
+    """Окна сеанса, в которые не попал поток, опоздавший в уже закрытое окно."""
+    return {
+        d["details"].get("window_id")
+        for d in store.divergences(conn, run_id)
+        if d["kind"] == "window_late_dropped"
+    }
 
 
 def _model_version(run: dict) -> str:
@@ -104,7 +142,9 @@ def _compare_verdicts(sv: pl.DataFrame, bv: pl.DataFrame) -> dict:
 def _incidents(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     rows = conn.execute(
         "SELECT i.*, a.action_type AS a_type, a.target AS a_target, a.rule_id AS a_rule, "
-        "a.state AS a_state FROM incidents i LEFT JOIN actions a ON a.incident_id = i.incident_id "
+        "a.state AS a_state, (SELECT COUNT(*) FROM alerts w WHERE w.incident_id = i.incident_id "
+        "AND w.alert_kind = 'window') AS n_window_alerts "
+        "FROM incidents i LEFT JOIN actions a ON a.incident_id = i.incident_id "
         "WHERE i.run_id = ? AND i.merged_into IS NULL",
         (run_id,),
     ).fetchall()
@@ -119,6 +159,8 @@ def _incidents(conn: sqlite3.Connection, run_id: str) -> list[dict]:
             d["n_alerts"],
             d["severity"],
             tuple(json.loads(d["targets"])),
+            # фича 007: сколько из n_alerts — алерты окон (разбивка по видам, R16)
+            d["n_window_alerts"],
         )
         d["action_sig"] = (d["a_type"], d["a_target"], d["a_rule"])
         out.append(d)
@@ -127,7 +169,11 @@ def _incidents(conn: sqlite3.Connection, run_id: str) -> list[dict]:
 
 def _sig_dict(sig: tuple) -> dict:
     keys = ("src_ip", "attack_class", "first_seen_ms", "last_seen_ms", "n_alerts", "severity")
-    return {**dict(zip(keys, sig[:6], strict=True)), "targets": list(sig[6])}
+    return {
+        **dict(zip(keys, sig[:6], strict=True)),
+        "targets": list(sig[6]),
+        "n_window_alerts": sig[7],
+    }
 
 
 def _incident_reasons(conn, run_id: str) -> tuple[set[str], set[str]]:
@@ -174,6 +220,36 @@ def compare(conn: sqlite3.Connection, runs_dir: Path, session_id: str, batch_id:
             }
         )
 
+    # Фича 007: вердикты окон
+    dropped = _dropped_windows(conn, session_id)
+    sw, bw = session_windows(runs_dir, session_id), batch_windows(runs_dir, batch_id)
+    windows = None
+    if sw.height or bw.height:
+        windows = _compare_verdicts(
+            sw.rename({"window_id": "flow_uid"}), bw.rename({"window_id": "flow_uid"})
+        )
+        bad_ids = {e["flow_uid"] for e in windows["examples"]} | set(windows["only_batch"])
+        bad_ids |= set(windows["only_session"])
+        if windows["mismatched"] or windows["n_only_session"] or windows["n_only_batch"]:
+            explained = bool(dropped) and bad_ids <= dropped
+            divergences.append(
+                {
+                    "reason": "window_late_dropped" if explained else "other",
+                    "what": "windows",
+                    "text": (
+                        f"окна: различаются {windows['mismatched']}, только в сеансе "
+                        f"{windows['n_only_session']}, только в пакетном {windows['n_only_batch']}"
+                    ),
+                }
+            )
+    dropped_incidents = {
+        r[0]
+        for w in dropped
+        for r in conn.execute(
+            "SELECT incident_id FROM alerts WHERE run_id = ? AND flow_uid = ?", (session_id, w)
+        )
+    }
+
     s_inc, b_inc = _incidents(conn, session_id), _incidents(conn, batch_id)
     s_count, b_count = Counter(i["sig"] for i in s_inc), Counter(i["sig"] for i in b_inc)
     only_s = s_count - b_count
@@ -192,6 +268,8 @@ def compare(conn: sqlite3.Connection, runs_dir: Path, session_id: str, batch_id:
             return "merge_blocked_by_decision"
         if iid in late:
             return "late_beyond_allowed"
+        if iid in dropped_incidents:
+            return "window_late_dropped"
         return "other"
 
     for sig in only_s.elements():
@@ -258,6 +336,8 @@ def compare(conn: sqlite3.Connection, runs_dir: Path, session_id: str, batch_id:
         },
         "batch": {"run_id": batch_id, "source": batch["source"], "model": _model_version(batch)},
         "verdicts": verdicts,
+        "windows": windows,
+        "n_window_late_dropped": len(dropped),
         "incidents": {
             "session": len(s_inc),
             "batch": len(b_inc),
@@ -268,6 +348,18 @@ def compare(conn: sqlite3.Connection, runs_dir: Path, session_id: str, batch_id:
         "divergences_by_reason": dict(sorted(by_reason.items())),
         "equivalent": by_reason.get("other", 0) == 0,
     }
+
+
+def _windows_text(report: dict) -> str:
+    w = report.get("windows")
+    if not w:
+        return "Эксперта окон нет ни в сеансе, ни в пакетном прогоне."
+    return (
+        f"Окон в сеансе {w['session']}, в пакетном {w['batch']}, у обоих {w['both']}; совпало "
+        f"{w['matched']}, различается {w['mismatched']}; только в сеансе {w['n_only_session']}, "
+        f"только в пакетном {w['n_only_batch']}; потоков, опоздавших в закрытое окно, — "
+        f"{report.get('n_window_late_dropped', 0)}."
+    )
 
 
 def render_compare(report: dict) -> str:
@@ -286,10 +378,14 @@ def render_compare(report: dict) -> str:
         f"совпало {v['matched']}, различается {v['mismatched']}; только в сеансе "
         f"{v['n_only_session']}, только в пакетном {v['n_only_batch']}.",
         "",
+        "## Окна",
+        "",
+        _windows_text(report),
+        "",
         "## Инциденты",
         "",
         f"В сеансе {i['session']}, в пакетном {i['batch']}, совпало по содержанию "
-        f"{i['matched']} (ключ, границы, число алертов, серьёзность, цели).",
+        f"{i['matched']} (ключ, границы, число алертов и из них алертов окон, серьёзность, цели).",
         "",
         "## Действия",
         "",

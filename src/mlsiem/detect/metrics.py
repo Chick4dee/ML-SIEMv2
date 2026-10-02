@@ -168,3 +168,26 @@ def unreliable_classes(y: np.ndarray, classes: list[str], below: int = 50) -> li
         if 0 < n < below:
             out.append(cls)
     return sorted(out)
+
+
+# ---------------------------------------------------------------- фича 007: окна
+
+
+def reliable_classes(y: np.ndarray, classes: list[str], min_windows: int) -> list[str]:
+    """Классы, у которых в части (val) не меньше `min_windows` примеров (research R8).
+
+    На уровне окон большинство классов атак представлены единицами (analysis — 5 окон на val,
+    dos — 1): их PR-AUC 0 или 1 почти случайно. В метрику выбора идут только «надёжные»
+    классы; benign — по тому же правилу, без исключений. Порог записан в конфиг до запуска.
+    """
+    y = np.asarray(y)
+    return [c for c in classes if int((y == c).sum()) >= min_windows]
+
+
+def macro_pr_auc_reliable(per_class: dict[str, float | None], reliable: list[str]) -> float:
+    """Macro PR-AUC только по надёжным классам (метрика выбора фичи 007).
+
+    Если надёжны все классы с примерами, результат совпадает с `macro_pr_auc`.
+    """
+    values = [per_class[c] for c in reliable if per_class.get(c) is not None]
+    return float(np.mean(values)) if values else float("nan")

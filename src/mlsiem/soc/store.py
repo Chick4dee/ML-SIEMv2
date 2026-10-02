@@ -54,8 +54,10 @@ RUN_STATUSES = ("running", "stopped", "completed")
 SYSTEM_ACTOR = "system"
 # Версия схемы в PRAGMA user_version. База фичи 002 имеет 0 (единица зарезервирована как
 # «схема 002», чтобы явно отличать её от пустого файла); фича 003 вводит версию 2, фича 004 — 3,
-# фича 005 — 4
-SCHEMA_VERSION = 4
+# фича 005 — 4, фича 007 — 5, фича 006 — 6
+SCHEMA_VERSION = 6
+# Вид алерта (фича 007): алерт потока или алерт окна (research R12)
+ALERT_KINDS = ("flow", "window")
 
 
 # ---------------------------------------------------------------- ошибки
@@ -204,7 +206,50 @@ STREAM_TABLES = (
     "CREATE INDEX IF NOT EXISTS ix_stream_stats_run ON stream_stats(run_id, at)",
     "CREATE INDEX IF NOT EXISTS ix_stream_seen_seq ON stream_seen(run_id, seq)",
 )
-STREAM_TABLES_DDL = "".join(f"{stmt};\n" for stmt in STREAM_TABLES)
+# Для свежей базы stream_stats сразу создаётся со столбцами сенсора (фича 006). STREAM_TABLES
+# остаётся прежним: его же использует MIGRATION_V4, а столбцы сенсора добавляет MIGRATION_V6.
+_STATS_TAIL_V4 = "    rate_per_s       REAL\n)"
+_STATS_TAIL_V6 = """    rate_per_s       REAL,
+    -- фича 006: показатели живого сенсора (R17); у проигрывателей 005 — NULL
+    packets_per_s    REAL,
+    flows_per_s      REAL,
+    drops            INTEGER,
+    buffer_fill      REAL,
+    liveness         INTEGER
+)"""
+STREAM_TABLES_FRESH = tuple(
+    stmt.replace(_STATS_TAIL_V4, _STATS_TAIL_V6) if "stream_stats (" in stmt else stmt
+    for stmt in STREAM_TABLES
+)
+STREAM_TABLES_DDL = "".join(f"{stmt};\n" for stmt in STREAM_TABLES_FRESH)
+
+# Незакрытые окна онлайн-сеанса (фича 007, research R13, data-model «Незакрытые окна»):
+# - window_pending — потоки открытых окон: payload — orjson полей, нужных `build_windows` и
+#   эксперту окон. Пишется в ТОЙ ЖЕ транзакции, что пачка и позиция: окна переживают
+#   перезапуск потребителя без потерь, а перечитывать Kafka не нужно;
+# - window_closed — какие окна сеанса уже закрыты: поток, пришедший в закрытое окно, в него не
+#   добавляется (опоздал сильнее допустимого) и считается в n_window_late_dropped
+WINDOW_TABLES = (
+    """CREATE TABLE IF NOT EXISTS window_pending (
+    run_id           TEXT NOT NULL,
+    flow_uid         TEXT NOT NULL,
+    window_id        TEXT NOT NULL,
+    window_start_ms  INTEGER NOT NULL,
+    attacker_ip      TEXT NOT NULL,
+    payload          BLOB NOT NULL,
+    PRIMARY KEY (run_id, flow_uid)
+)""",
+    "CREATE INDEX IF NOT EXISTS ix_window_pending_start ON window_pending(run_id, window_start_ms)",
+    """CREATE TABLE IF NOT EXISTS window_closed (
+    run_id           TEXT NOT NULL,
+    window_id        TEXT NOT NULL,
+    closed_at        TEXT NOT NULL,
+    n_flows          INTEGER NOT NULL,
+    PRIMARY KEY (run_id, window_id)
+)""",
+    "CREATE INDEX IF NOT EXISTS ix_alerts_kind ON alerts(incident_id, alert_kind)",
+)
+WINDOW_TABLES_DDL = "".join(f"{stmt};\n" for stmt in WINDOW_TABLES)
 
 DDL = f"""
 CREATE TABLE IF NOT EXISTS runs (
@@ -225,7 +270,9 @@ CREATE TABLE IF NOT EXISTS runs (
     status           TEXT NOT NULL DEFAULT 'completed' CHECK (status IN {_in(RUN_STATUSES)}),
     source_id        TEXT,
     last_activity_at TEXT,
-    model_version    TEXT
+    model_version    TEXT,
+    -- фича 006: у сеанса живого сенсора были потери захвата или буфера (R10)
+    lossy            INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS incidents (
@@ -280,6 +327,9 @@ CREATE TABLE IF NOT EXISTS alerts (
     -- фича 005: опоздавший поток и когда потребитель записал алерт (для задержки)
     late             INTEGER NOT NULL DEFAULT 0,
     received_at      TEXT,
+    -- фича 007: вид алерта и описание окна (JSON) у алертов окон
+    alert_kind       TEXT NOT NULL DEFAULT 'flow' CHECK (alert_kind IN {_in(ALERT_KINDS)}),
+    window_info      TEXT,
     UNIQUE (run_id, flow_uid)
 );
 
@@ -317,7 +367,7 @@ CREATE INDEX IF NOT EXISTS ix_incidents_status ON incidents(status);
 CREATE INDEX IF NOT EXISTS ix_incidents_class ON incidents(attack_class);
 CREATE INDEX IF NOT EXISTS ix_alerts_incident ON alerts(incident_id, first_seen_ms);
 CREATE INDEX IF NOT EXISTS ix_history_incident ON incident_history(incident_id);
-{INDEXES_V2_DDL}{INDEXES_V3_DDL}{STREAM_TABLES_DDL}{INDEXES_V4_DDL}"""
+{INDEXES_V2_DDL}{INDEXES_V3_DDL}{STREAM_TABLES_DDL}{INDEXES_V4_DDL}{WINDOW_TABLES_DDL}"""
 
 # Миграция схемы 002 (0) → 2. Шаги выполняются по одному внутри ОДНОЙ транзакции (см.
 # `migrate`): executescript здесь нельзя — он сам делает COMMIT перед началом.
@@ -395,6 +445,31 @@ MIGRATION_V4: tuple[str, ...] = (
     "PRAGMA user_version = 4",
 )
 
+# Миграция схемы 4 (фича 005) → 5 (фича 007), одной транзакцией (research R14). Только
+# добавления: вид алерта (старые алерты получают 'flow' значением по умолчанию — это и есть
+# «прогон до 007»), описание окна и таблицы незакрытых окон сеанса. Аудит не трогается: новых
+# событий нет.
+MIGRATION_V5: tuple[str, ...] = (
+    "ALTER TABLE alerts ADD COLUMN alert_kind TEXT NOT NULL DEFAULT 'flow' "
+    f"CHECK (alert_kind IN {_in(ALERT_KINDS)})",
+    "ALTER TABLE alerts ADD COLUMN window_info TEXT",
+    *WINDOW_TABLES,
+    "PRAGMA user_version = 5",
+)
+
+# Миграция схемы 5 (фича 007) → 6 (фича 006), одной транзакцией (data-model «Миграция 5 → 6»).
+# Только добавления: показатели живого сенсора в stream_stats (у старых строк и у источников-
+# проигрывателей они NULL) и флаг «были потери» у сеанса (по умолчанию 0 — потерь не было).
+MIGRATION_V6: tuple[str, ...] = (
+    "ALTER TABLE stream_stats ADD COLUMN packets_per_s REAL",
+    "ALTER TABLE stream_stats ADD COLUMN flows_per_s REAL",
+    "ALTER TABLE stream_stats ADD COLUMN drops INTEGER",
+    "ALTER TABLE stream_stats ADD COLUMN buffer_fill REAL",
+    "ALTER TABLE stream_stats ADD COLUMN liveness INTEGER",
+    "ALTER TABLE runs ADD COLUMN lossy INTEGER NOT NULL DEFAULT 0",
+    "PRAGMA user_version = 6",
+)
+
 
 def now_iso() -> str:
     """Текущее время в ISO-8601 UTC с точностью до миллисекунд."""
@@ -422,11 +497,13 @@ def init_db(conn: sqlite3.Connection) -> bool:
     """Готовит базу к работе и возвращает True, если пришлось мигрировать схему.
 
     Случаи по `PRAGMA user_version` и наличию таблиц:
-    - пустой файл → сразу схема 4;
+    - пустой файл → сразу схема 6;
     - схема 002 (версия 0 или 1, таблицы есть) → `MIGRATION_V2`, `MIGRATION_V3`, `MIGRATION_V4`;
     - схема 2 (фича 003) → `MIGRATION_V3`, затем `MIGRATION_V4`;
-    - схема 3 (фича 004) → `MIGRATION_V4`;
-    - схема 4 → только IF NOT EXISTS (ничего не меняется);
+    - схема 3 (фича 004) → `MIGRATION_V4`, затем `MIGRATION_V5`;
+    - схема 4 (фича 005) → `MIGRATION_V5`, затем `MIGRATION_V6`;
+    - схема 5 (фича 007) → `MIGRATION_V6`;
+    - схема 6 → только IF NOT EXISTS (ничего не меняется);
     - версия больше известной → `SchemaTooNew`: база от более нового кода, трогать нельзя.
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -450,12 +527,19 @@ def init_db(conn: sqlite3.Connection) -> bool:
 def migrate(conn: sqlite3.Connection) -> None:
     """Доводит базу до текущей схемы; каждый шаг цепочки — своей транзакцией.
 
-    0 → 2 (фича 003), 2 → 3 (фича 004) и 3 → 4 (фича 005). Сбой посреди шага откатывает только
+    0 → 2 (фича 003), 2 → 3 (фича 004), 3 → 4 (фича 005), 4 → 5 (фича 007) и 5 → 6 (фича
+    006). Сбой посреди шага откатывает только
     этот шаг: база остаётся целиком в предыдущей схеме, и повторный запуск продолжит с неё.
     Списки шагов читаются из модуля в момент вызова — тесты подменяют их, чтобы уронить шаг.
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    for target, steps in ((2, MIGRATION_V2), (3, MIGRATION_V3), (4, MIGRATION_V4)):
+    for target, steps in (
+        (2, MIGRATION_V2),
+        (3, MIGRATION_V3),
+        (4, MIGRATION_V4),
+        (5, MIGRATION_V5),
+        (6, MIGRATION_V6),
+    ):
         if version < target:
             with transaction(conn):
                 for step in steps:
@@ -555,6 +639,9 @@ ALERT_COLUMNS = (
     "fired_experts",
     "experts",
     "explanation",
+    # фича 007
+    "alert_kind",
+    "window_info",
 )
 INCIDENT_COLUMNS = (
     "incident_id",
@@ -606,6 +693,8 @@ def _alert_defaults(a: dict) -> dict:
         "fired_experts": None,
         "experts": None,
         "explanation": None,
+        "alert_kind": "flow",
+        "window_info": None,
     }
 
 
@@ -726,6 +815,8 @@ def _run_row(r: sqlite3.Row) -> dict:
     d["summary"] = json.loads(d["summary"])
     d["warnings"] = json.loads(d["warnings"])
     d["model"] = run_model(d)
+    # Фича 007: раздел «эксперт окон» сводки; None — прогон до 007
+    d["windows"] = d["summary"].get("windows")
     return d
 
 
@@ -758,6 +849,12 @@ def alert_row(r: sqlite3.Row | dict) -> dict:
         d["fired_experts"] = [x for x in d["fired_experts"].split(",") if x]
     if "reversed" in d:
         d["reversed"] = bool(d["reversed"])
+    # Фича 007: вид алерта и разобранное описание окна (у алертов потоков — None)
+    if "alert_kind" in d or "window_info" in d:
+        d["alert_kind"] = d.get("alert_kind") or "flow"
+        d["window_info"] = json.loads(d["window_info"]) if d.get("window_info") else None
+        # Имена контракта API (contracts/api-ui-additions.md): kind и window
+        d["kind"], d["window"] = d["alert_kind"], d["window_info"]
     return d
 
 
@@ -1183,6 +1280,10 @@ def _incident_filters(conn: sqlite3.Connection, filters: dict) -> tuple[str, lis
     # скрыты. У пакетных прогонов merged_into всегда NULL — их выдача не меняется
     if not filters.get("show_merged"):
         where.append("i.merged_into IS NULL")
+    # ---- фича 007: инциденты с алертами окон (индекс ix_alerts_kind)
+    if filters.get("has_window_alerts") is not None:
+        exists = f"EXISTS (SELECT 1 {WINDOW_ALERTS_OF_INCIDENT})"
+        where.append(exists if filters["has_window_alerts"] else f"NOT {exists}")
     return (" WHERE " + " AND ".join(where)) if where else "", params
 
 
@@ -1202,6 +1303,12 @@ def _order_by(sort: str | None, direction: str | None) -> str:
 
 
 INCIDENT_FROM = "FROM incidents i LEFT JOIN actions a ON a.incident_id = i.incident_id"
+# Алерты окон инцидента `i` (фича 007) — подзапрос по индексу ix_alerts_kind. У прогонов до
+# 007 все алерты — `flow` (значение по умолчанию колонки), поэтому число окон там 0
+WINDOW_ALERTS_OF_INCIDENT = (
+    "FROM alerts w WHERE w.incident_id = i.incident_id AND w.alert_kind = 'window'"
+)
+N_WINDOW_ALERTS_SQL = f"(SELECT COUNT(*) {WINDOW_ALERTS_OF_INCIDENT}) AS n_window_alerts"
 
 
 def list_incidents(
@@ -1222,7 +1329,8 @@ def list_incidents(
     order = _order_by(sort, direction)
     total = conn.execute(f"SELECT COUNT(*) {INCIDENT_FROM}{where}", params).fetchone()[0]
     rows = conn.execute(
-        "SELECT i.*, a.action_id AS a_action_id, a.action_type AS a_action_type, "
+        f"SELECT i.*, {N_WINDOW_ALERTS_SQL}, a.action_id AS a_action_id, "
+        "a.action_type AS a_action_type, "
         f"a.target AS a_target, a.state AS a_state {INCIDENT_FROM}{where} "
         f"ORDER BY {order} LIMIT ? OFFSET ?",
         [*params, limit, offset],
@@ -1238,7 +1346,10 @@ def list_incidents(
 
 def get_incident(conn: sqlite3.Connection, incident_id: str) -> dict:
     """Карточка: инцидент + полное действие + история изменений."""
-    row = conn.execute("SELECT * FROM incidents WHERE incident_id = ?", (incident_id,)).fetchone()
+    row = conn.execute(
+        f"SELECT i.*, {N_WINDOW_ALERTS_SQL} FROM incidents i WHERE i.incident_id = ?",
+        (incident_id,),
+    ).fetchone()
     if row is None:
         raise NotFound(f"инцидент {incident_id} не найден")
     inc = _incident_row(row)
@@ -1256,21 +1367,30 @@ def get_incident(conn: sqlite3.Connection, incident_id: str) -> dict:
 
 
 def list_alerts(
-    conn: sqlite3.Connection, incident_id: str, limit: int = 50, offset: int = 0
+    conn: sqlite3.Connection,
+    incident_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    *,
+    kind: str | None = None,
 ) -> tuple[int, list[dict]]:
-    """Алерты инцидента постранично, по времени начала потока."""
+    """Алерты инцидента постранично, по времени начала потока. `kind` (фича 007) —
+    только алерты потоков (`flow`) или окон (`window`); без него — все, как раньше."""
     exists = conn.execute(
         "SELECT 1 FROM incidents WHERE incident_id = ?", (incident_id,)
     ).fetchone()
     if exists is None:
         raise NotFound(f"инцидент {incident_id} не найден")
-    total = conn.execute(
-        "SELECT COUNT(*) FROM alerts WHERE incident_id = ?", (incident_id,)
-    ).fetchone()[0]
+    where, params = "incident_id = ?", [incident_id]
+    if kind is not None:
+        if kind not in ALERT_KINDS:
+            raise BadRequest(f"вид алерта {kind!r}: допустимы {list(ALERT_KINDS)}")
+        where += " AND alert_kind = ?"
+        params.append(kind)
+    total = conn.execute(f"SELECT COUNT(*) FROM alerts WHERE {where}", params).fetchone()[0]
     rows = conn.execute(
-        "SELECT * FROM alerts WHERE incident_id = ? ORDER BY first_seen_ms, flow_uid "
-        "LIMIT ? OFFSET ?",
-        (incident_id, limit, offset),
+        f"SELECT * FROM alerts WHERE {where} ORDER BY first_seen_ms, flow_uid LIMIT ? OFFSET ?",
+        [*params, limit, offset],
     ).fetchall()
     return total, [alert_row(r) for r in rows]
 
@@ -1419,14 +1539,25 @@ def alert_histogram(conn: sqlite3.Connection, incident_id: str, bins: int = 40) 
     bin_ms = max(1000, math.ceil((end - start) / bins))
     n_bins = min(bins, (end - start) // bin_ms + 1)
     counts = [0] * n_bins
+    # Фича 007: алерты окон — отдельным рядом (консоль раскрашивает их иначе); `counts` по-
+    # прежнему считает ВСЕ алерты, чтобы смысл поля 003 не менялся
+    window_counts = [0] * n_bins
     rows = conn.execute(
-        "SELECT MAX(0, MIN((first_seen_ms - ?) / ?, ?)) AS b, COUNT(*) AS n FROM alerts "
-        "WHERE incident_id = ? GROUP BY b",
+        "SELECT MAX(0, MIN((first_seen_ms - ?) / ?, ?)) AS b, alert_kind, COUNT(*) AS n "
+        "FROM alerts WHERE incident_id = ? GROUP BY b, alert_kind",
         (start, bin_ms, n_bins - 1, incident_id),
     )
     for r in rows:
         counts[int(r["b"])] += r["n"]
-    return {"start_ms": start, "end_ms": end, "bin_ms": bin_ms, "counts": counts}
+        if r["alert_kind"] == "window":
+            window_counts[int(r["b"])] += r["n"]
+    return {
+        "start_ms": start,
+        "end_ms": end,
+        "bin_ms": bin_ms,
+        "counts": counts,
+        "window_counts": window_counts,
+    }
 
 
 def dashboard_summary(conn: sqlite3.Connection, run_id: str) -> dict:
@@ -1920,6 +2051,7 @@ def append_batch(
     sessions: dict[str, dict] | None = None,
     stats: list[dict] | None = None,
     at: str | None = None,
+    extra: list | None = None,
 ) -> None:
     """Пачка потребителя ОДНОЙ транзакцией (FR-012, FR-015, FR-016, research R7).
 
@@ -1932,7 +2064,9 @@ def append_batch(
       `summary` (прибавки к счётчикам сводки 004: alerts_by_expert, n_reversed),
       `status`/`reason` (новый статус сеанса);
     - `offsets` — позиции чтения (следующая позиция) по (топик, партиция);
-    - `stats` — строки показателей (R11).
+    - `stats` — строки показателей (R11);
+    - `extra` — дополнительные записи той же транзакции: функции `(conn, at)`. Фича 007
+      пишет так незакрытые и закрытые окна сеанса (R13) — вместе с позицией, а не отдельно.
 
     Любая ошибка — ROLLBACK: ни алертов, ни позиции. Брокеру позиция подтверждается только
     после успешного возврата отсюда.
@@ -1944,6 +2078,8 @@ def append_batch(
         per_run: dict[str, dict[str, int]] = {}
         for plan in plans:
             per_run[plan.run_id] = _apply_plan(conn, plan, at)
+        for fn in extra or []:
+            fn(conn, at)
         for run_id, items in seen.items():
             conn.executemany(
                 "INSERT OR IGNORE INTO stream_seen (run_id, flow_uid, seq) VALUES (?, ?, ?)",
@@ -1998,8 +2134,9 @@ def write_stats(conn: sqlite3.Connection, rows: list[dict], *, at: str | None = 
     at = at or now_iso()
     conn.executemany(
         "INSERT INTO stream_stats (at, run_id, processed, lag_messages, lag_seconds, "
-        "latency_p50_ms, latency_p95_ms, rejected, late, rate_per_s) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "latency_p50_ms, latency_p95_ms, rejected, late, rate_per_s, packets_per_s, "
+        "flows_per_s, drops, buffer_fill, liveness) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 r.get("at", at),
@@ -2012,12 +2149,37 @@ def write_stats(conn: sqlite3.Connection, rows: list[dict], *, at: str | None = 
                 r.get("rejected", 0),
                 r.get("late", 0),
                 r.get("rate_per_s"),
+                r.get("packets_per_s"),
+                r.get("flows_per_s"),
+                r.get("drops"),
+                r.get("buffer_fill"),
+                r.get("liveness"),
             )
             for r in rows
         ],
     )
     cutoff = _iso_at(_ts(at) - STATS_KEEP_HOURS * 3600)
     conn.execute("DELETE FROM stream_stats WHERE at < ?", (cutoff,))
+
+
+def latest_sensor_stats(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    """Последняя строка показателей сенсора сеанса (фича 006): где заполнены packets_per_s.
+
+    Показатели сенсора пишет сам сенсор, а стандартные показатели 005 — потребитель, разными
+    строками; `latest_stats` вернул бы любую последнюю, поэтому для сенсор-полей отбираем
+    последнюю строку, где они есть."""
+    row = conn.execute(
+        "SELECT packets_per_s, flows_per_s, drops, buffer_fill, liveness FROM stream_stats "
+        "WHERE run_id = ? AND packets_per_s IS NOT NULL ORDER BY stat_id DESC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def mark_lossy(conn: sqlite3.Connection, run_id: str) -> None:
+    """Сеанс «с потерями» (фича 006, R10): сенсор потерял пакеты или потоки при отказе
+    брокера/перегрузке. Флаг только поднимается — потеря не «заживает» сама."""
+    conn.execute("UPDATE runs SET lossy = 1 WHERE run_id = ?", (run_id,))
 
 
 def latest_stats(conn: sqlite3.Connection, run_id: str) -> dict | None:

@@ -135,3 +135,20 @@ def test_fpr_on_benign():
 def test_unreliable_classes():
     y = np.array(["benign"] * 100 + ["worms"] * 3 + ["dos"] * 60)
     assert M.unreliable_classes(y, ["benign", "worms", "dos", "backdoor"], below=50) == ["worms"]
+
+
+# ---------------------------------------------------------------- фича 007: надёжные классы
+
+
+def test_reliable_classes_by_count():
+    y = np.array(["benign"] * 30 + ["exploits"] * 20 + ["dos"] * 3)
+    classes = ["benign", "dos", "exploits", "worms"]
+    assert M.reliable_classes(y, classes, 20) == ["benign", "exploits"]
+    assert M.reliable_classes(y, classes, 31) == []
+
+
+def test_macro_reliable_matches_macro_when_all_reliable():
+    per_class = {"benign": 0.9, "exploits": 0.5, "dos": 0.1, "worms": None}
+    assert M.macro_pr_auc_reliable(per_class, ["benign", "exploits"]) == pytest.approx(0.7)
+    everyone = ["benign", "exploits", "dos"]
+    assert M.macro_pr_auc_reliable(per_class, everyone) == pytest.approx(M.macro_pr_auc(per_class))

@@ -330,3 +330,14 @@ blockquote.comment { margin: 4px 0 0; padding: 2px 10px; border-left: 3px solid 
 .stream-panel .facts { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
 .note { border-left: 4px solid var(--accent); padding: 8px 12px; margin: 8px 0 16px; }
 .note.after-note { border-left-color: var(--warn-text); background: var(--warn-bg); }
+
+/* ---- фича 007: эксперт окон */
+.badge.window { background: var(--accent); color: #fff; }
+.badge.flow { background: var(--border); color: inherit; }
+.histogram .bar.window { fill: var(--accent); opacity: 0.75; }
+.legend-window { color: var(--accent); }
+.kind-switch { margin: 4px 0 8px; }
+.window-details .facts { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); margin: 6px 0; }
+.window-details table { margin: 6px 0; font-size: 0.85rem; }
+.window-details caption { text-align: left; font-weight: 600; padding: 2px 0; }
+.window-details td, .window-details th { padding: 2px 6px; }

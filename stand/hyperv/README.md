@@ -85,3 +85,76 @@ Kafka и топики фиксированы в конфиге.
 - SSH на машину: `ssh mlsiem@10.77.0.10` (ключ хоста, пароля нет);
 - `stand check` пишет «изоляция не проверена» — запустите его от администратора или
   участника группы «Администраторы Hyper-V».
+
+## Машины стенда и сенсор (006)
+
+Поверх брокера и сетей 005 поднимаются две машины в сети стенда `mlsiem-lab` (Private) —
+**жертва** и **атакующий** — и **живой сенсор** на брокерной машине. Полная проверка от
+пустого стенда до оценки модели — в
+[specs/006-lab-stand-live-sensor/quickstart.md](../../specs/006-lab-stand-live-sensor/quickstart.md).
+
+Те же правила, что у брокера: запуск **от администратора**, каждый меняющий шаг спрашивает
+подтверждение, `-WhatIf` — только план, повторный запуск безопасен, значения — только из
+`configs/stream.yaml` (раздел `lab`).
+
+### Что создаётся и сколько займёт
+
+| Что | Ресурсы |
+|---|---|
+| машина `mlsiem-victim` (web/SSH/FTP/DNS) в сети стенда, Gen 2, 1 vCPU | **1 ГБ ОЗУ статически**, диск до 10 ГБ |
+| машина `mlsiem-attacker` (nmap, ffuf, hydra, slowhttptest, tcpreplay) + COM-порт управления | **1 ГБ ОЗУ статически**, диск до 10 ГБ |
+| сенсорный адаптер брокерной машины в `mlsiem-lab` без IP (приёмник зеркала) | **+1 ГБ ОЗУ** брокеру |
+| две seed-ISO автоустановки `var\stand\seed-victim.iso`, `seed-attacker.iso` | ~0,1–0,5 МБ |
+
+Образ Ubuntu тот же, что у брокера, — заново не скачивается. При всех поднятых машинах хосту
+должно оставаться **≥ 4 ГБ** свободной памяти (SC-009) — это проверяет `stand check`.
+
+### Изоляция (FR-005)
+
+- у машин стенда адаптер только в `mlsiem-lab` (на время установки — ещё Default Switch, его
+  отключает шаг пост-установки); служебной сети у них нет — из стенда к хосту и брокеру
+  пути нет;
+- хост управляет атакующим по **COM-порту** его ВМ (канал гипервизора, не сеть), а не по SSH;
+- сенсор слышит сеть стенда через **зеркало портов** Hyper-V, своего адреса в ней не имея;
+- `mlsiem lab scenario run` отклоняет сценарий, если хоть одна цель вне `mlsiem-lab`.
+
+### Порядок
+
+```powershell
+# Сети и брокер (005) уже должны быть подняты: 10-network.ps1, 20-vm-broker.ps1, 30-post-install.ps1
+
+# 6. Seed-ISO жертвы и атакующего (только файлы)
+uv run mlsiem stand seed-iso --role victim
+uv run mlsiem stand seed-iso --role attacker
+
+# 7. Машина-жертва. Образ Ubuntu — тот же, что у брокера
+.\stand\hyperv\40-vm-victim.ps1 -Iso D:\iso\ubuntu-24.04.3-live-server-amd64.iso -WhatIf
+.\stand\hyperv\40-vm-victim.ps1 -Iso D:\iso\ubuntu-24.04.3-live-server-amd64.iso
+#    консоль (vmconnect localhost mlsiem-victim) → yes на «Continue with autoinstall?»; затем:
+.\stand\hyperv\45-post-install.ps1 -Role victim
+
+# 8. Машина-атакующий (аналогично), с каналом управления по COM-порту
+.\stand\hyperv\50-vm-attacker.ps1 -Iso D:\iso\ubuntu-24.04.3-live-server-amd64.iso
+.\stand\hyperv\45-post-install.ps1 -Role attacker
+
+# 9. Зеркало портов на сенсор (главный риск — проверить первым, см. quickstart §1)
+.\stand\hyperv\60-sensor-adapter.ps1 -WhatIf
+.\stand\hyperv\60-sensor-adapter.ps1
+#    Если зеркало на этой сборке Hyper-V не доставляет кадры — отдельная ВМ-сенсор (R7a):
+.\stand\hyperv\60-sensor-adapter.ps1 -Standalone -Iso D:\iso\ubuntu-24.04.3-live-server-amd64.iso
+
+# Проверка всего стенда (брокер + машины + изоляция + часы + память)
+uv run mlsiem stand check
+
+# Сенсор и сценарии
+.\stand\hyperv\70-sensor.ps1 start           # живой сенсор на брокерной машине
+uv run mlsiem lab demo                        # готовность → контрольный сценарий → остальные
+.\stand\hyperv\70-sensor.ps1 stop
+
+# Удалить только машины стенда 006 (брокер и сети 005 не трогает)
+.\stand\hyperv\91-remove-lab.ps1 -WhatIf
+.\stand\hyperv\91-remove-lab.ps1
+```
+
+Скрипты `80-scenario.ps1` и `lib-com.ps1` вызываются самим `mlsiem` (канал управления
+атакующим), вручную их запускать не нужно.
