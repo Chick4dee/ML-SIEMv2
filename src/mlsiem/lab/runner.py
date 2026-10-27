@@ -6,7 +6,8 @@
 (он только для Windows-гостей), поэтому порт — основной путь, а не запасной (research R6).
 
 Протокол: строка JSON-запрос → строка JSON-ответ `{"ok": true|false, ...}`. Команды:
-`ping`, `clock`, `probe`, `scenario`, `normal`, `journal`. Одна команда за раз; сценарий
+`ping`, `clock`, `probe`, `scenario`, `variant` (008), `tools` (008), `put_file` (008), `diag`
+(008), `restart` (008), `normal`, `journal`. Одна команда за раз; сценарий
 блокирует канал на время запуска — хост ждёт ответ с запасом сверх `duration_limit_s`.
 
 `handle()` — чистая функция «запрос → ответ» без порта: на ней строятся тесты (канал без ВМ).
@@ -15,9 +16,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
+import shutil
 import socket
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -30,11 +35,30 @@ from mlsiem.lab.scenarios import (
     default_executor,
     list_scenarios,
 )
+from mlsiem.lab.variants import VariantRunner, expand_variants, list_variants
 
 DEFAULT_PORT = "/dev/ttyS0"
 DEFAULT_CONFIG = "/etc/mlsiem/lab.json"
 DEFAULT_JOURNAL = "/var/lib/mlsiem/journal.jsonl"
 PROBE_TIMEOUT_S = 2.0
+# Куда хост может класть файлы командой put_file (обновление кода раннера и конфига без SSH, 008)
+PUT_ROOTS = ("/opt/mlsiem", "/etc/mlsiem", "/usr/share/wordlists", "/var/lib/mlsiem")
+MAX_PUT_BYTES = 8 * 1024 * 1024
+TOOL_EXTRA = ("curl", "dig", "ssh", "sshpass", "ip")
+DIAG_EXTRA = (
+    "ls",
+    "cat",
+    "which",
+    "uname",
+    "id",
+    "df",
+    "free",
+    "ip",
+    "ss",
+    "systemctl",
+    "tail",
+    "head",
+)
 
 
 def tcp_probe(host: str, port: int, timeout_s: float = PROBE_TIMEOUT_S) -> bool:
@@ -64,6 +88,71 @@ class RunnerState:
         self.probe = probe
         self.scenarios = ScenarioRunner(raw, self.journal_path, executor=executor, clock=clock)
         self.normal = NormalRunner(raw, self.journal_path, executor=executor, clock=clock)
+        self.variants = VariantRunner(raw, self.journal_path, executor=executor, clock=clock)
+
+
+def tool_info(tool: str, version_arg: str = "--version", timeout_s: float = 5.0) -> dict | None:
+    """Путь и первая строка вывода версии инструмента; None — инструмента нет на машине."""
+    path = shutil.which(tool)
+    if not path:
+        return None
+    try:
+        done = subprocess.run(
+            [path, version_arg], capture_output=True, text=True, timeout=timeout_s, errors="replace"
+        )
+        text = (done.stdout or done.stderr or "").strip().splitlines()
+        version = text[0][:120] if text else ""
+    except (OSError, subprocess.SubprocessError):
+        version = ""
+    return {"path": path, "version": version}
+
+
+def tools_report(raw: dict) -> dict:
+    """Инструменты всех вариантов и нормы: версии или None (недоступен) — для `lab tools check`."""
+    report: dict = {}
+    for v in expand_variants(raw):
+        report.setdefault(v["tool"], tool_info(v["tool"], v.get("version_arg", "--version")))
+    for t in TOOL_EXTRA:
+        report.setdefault(t, tool_info(t, "-V" if t in ("ssh",) else "--version"))
+    return report
+
+
+def put_file(path: str, content_b64: str, mode: str | None = None) -> dict:
+    """Записывает файл по команде хоста (только под PUT_ROOTS) и возвращает его размер и SHA-256."""
+    target = os.path.realpath(path)
+    if not any(target == r or target.startswith(r + os.sep) for r in PUT_ROOTS):
+        raise ValueError(f"путь {path!r} вне разрешённых каталогов {list(PUT_ROOTS)}")
+    data = base64.b64decode(content_b64)
+    if len(data) > MAX_PUT_BYTES:
+        raise ValueError(f"файл {len(data)} байт больше предела {MAX_PUT_BYTES}")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = target + ".part"
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, target)
+    if mode:
+        os.chmod(target, int(mode, 8))
+    return {"path": target, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def diag(raw: dict, argv: list[str], timeout_s: float = 10.0) -> dict:
+    """Диагностический запуск разрешённой утилиты (инструменты вариантов и безвредные системные), "
+    "вывод — хвост."""
+    allowed = {v["tool"] for v in expand_variants(raw)} | set(TOOL_EXTRA) | set(DIAG_EXTRA)
+    if not argv or argv[0] not in allowed:
+        raise ValueError(
+            f"diag: утилита {argv[:1]} не разрешена; допустимы {sorted(allowed)[:12]}…"
+        )
+    done = subprocess.run(
+        argv, capture_output=True, text=True, timeout=min(float(timeout_s), 30.0), errors="replace"
+    )
+    return {
+        "rc": done.returncode,
+        "stdout": (done.stdout or "")[-800:],
+        "stderr": (done.stderr or "")[-800:],
+    }
 
 
 def handle(state: RunnerState, request: dict) -> dict:
@@ -72,7 +161,11 @@ def handle(state: RunnerState, request: dict) -> dict:
     cmd = request.get("cmd")
     try:
         if cmd == "ping":
-            return {"ok": True, "scenarios": list_scenarios(state.raw)}
+            return {
+                "ok": True,
+                "scenarios": list_scenarios(state.raw),
+                "variants": list_variants(state.raw),
+            }
         if cmd == "clock":
             return {"ok": True, "now": state.clock()}
         if cmd == "probe":
@@ -88,6 +181,35 @@ def handle(state: RunnerState, request: dict) -> dict:
         if cmd == "scenario":
             rec = state.scenarios.run(request["name"], request.get("version"))
             return {"ok": rec["outcome"] != "rejected", "record": rec}
+        if cmd == "variant":
+            rec = state.variants.run(
+                request["scenario"],
+                request.get("variant"),
+                request.get("params") or {},
+                source_ip=request.get("source_ip"),
+                meta=request.get("meta") or {},
+            )
+            return {"ok": rec["outcome"] != "rejected", "record": rec}
+        if cmd == "tools":
+            return {"ok": True, "tools": tools_report(state.raw)}
+        if cmd == "diag":
+            return {
+                "ok": True,
+                **diag(
+                    state.raw, [str(a) for a in request.get("argv", [])], request.get("timeout", 10)
+                ),
+            }
+        if cmd == "restart":
+            # Служба systemd (Restart=always) поднимет раннер с новым кодом; ответ уходит до выхода
+            import threading
+
+            threading.Timer(0.7, lambda: os._exit(0)).start()
+            return {"ok": True, "restarting": True}
+        if cmd == "put_file":
+            return {
+                "ok": True,
+                **put_file(request["path"], request["content_b64"], request.get("mode")),
+            }
         if cmd == "normal":
             action = request.get("action")
             if action == "start":
@@ -100,7 +222,14 @@ def handle(state: RunnerState, request: dict) -> dict:
         if cmd == "journal":
             return {"ok": True, "records": journal.read(state.journal_path)}
         return {"ok": False, "error": f"неизвестная команда {cmd!r}"}
-    except (ScenarioError, journal.JournalError, RuntimeError, KeyError, ValueError) as exc:
+    except (
+        ScenarioError,
+        journal.JournalError,
+        RuntimeError,
+        KeyError,
+        ValueError,
+        OSError,
+    ) as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 

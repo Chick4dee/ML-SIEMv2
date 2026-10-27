@@ -51,14 +51,21 @@ def evaluate_dataset(
     lossy: bool = False,
     train_ranges: dict[str, tuple[float, float]] | None = None,
     direction: str = "auto",
+    by: list[str] | None = None,
+    fprs: tuple[float, ...] = (0.001, 0.01, 0.05),
 ) -> dict:
-    """Отчёт оценки (чистый расчёт). `threshold` по умолчанию — порог модели (из артефакта)."""
+    """Отчёт оценки (чистый расчёт). `threshold` по умолчанию — порог модели (из артефакта).
+
+    `by` — колонки метаданных набора версии 2 (`tool`, `source`, `variant`): добавляет разбивку
+    поимки
+    по ним (раздел `breakdown`), в том числе полноту при долях ложных срабатываний `fprs`."""
     threshold = float(model.threshold if threshold is None else threshold)
     classes = list(model.classes)
     catch_thresholds = catch_thresholds or {}
 
     verdicts = compute_verdicts(model, labeled, direction=direction)
-    v = verdicts.join(labeled.select("flow_uid", "label"), on="flow_uid", how="left")
+    extra = [c for c in dict.fromkeys([*(by or []), "part"]) if c in labeled.columns]
+    v = verdicts.join(labeled.select("flow_uid", "label", *extra), on="flow_uid", how="left")
 
     # ambiguous — вне метрик, но считаем
     n_ambiguous = int((v["label"] == AMBIGUOUS).sum())
@@ -102,6 +109,8 @@ def evaluate_dataset(
     benign_mask = y == BENIGN
     fpr = float(is_alert[benign_mask].mean()) if benign_mask.any() else None
 
+    breakdown = _breakdown(scored, by or [], threshold, fprs) if by else {}
+
     return {
         "threshold": threshold,
         "classes": classes,
@@ -115,7 +124,38 @@ def evaluate_dataset(
         "fpr_normal": fpr,
         "false_incidents": int(is_alert[benign_mask].sum()) if benign_mask.any() else 0,
         "unexplained": unexplained,
+        "breakdown": breakdown,
     }
+
+
+def _breakdown(scored: pl.DataFrame, by: list[str], threshold: float, fprs) -> dict:
+    """Поимка атак по значениям метаданных: доля с алертом при пороге артефакта и полнота при долях
+    ложных срабатываний. Пороги долей — квантили нормы части val набора (иначе — всей нормы)."""
+    benign = scored.filter(pl.col("label") == BENIGN)
+    if "part" in benign.columns and benign.filter(pl.col("part") == "val").height >= 100:
+        benign = benign.filter(pl.col("part") == "val")
+    ref = benign["attack_score"].to_numpy()
+    thr = {f: float(np.quantile(ref, 1 - f)) for f in fprs} if len(ref) else {}
+    attacks = scored.filter(pl.col("label") != BENIGN)
+    out: dict = {}
+    for col in by:
+        if col not in attacks.columns:
+            continue
+        rows = []
+        sub_all = attacks.filter(pl.col(col).is_not_null())
+        for (label, value), sub in sub_all.group_by(["label", col], maintain_order=True):
+            sc = sub["attack_score"].to_numpy()
+            rows.append(
+                {
+                    "class": label,
+                    col: value,
+                    "flows": int(sub.height),
+                    "caught_share": float((sc >= threshold).mean()),
+                    "recall_at": {str(f): float((sc >= t).mean()) for f, t in thr.items()},
+                }
+            )
+        out[col] = sorted(rows, key=lambda r: (r["class"], str(r[col])))
+    return out
 
 
 def _explain(cls, model_classes, scored_cls, lossy, train_ranges) -> str:
@@ -174,6 +214,25 @@ def _report_md(r: dict, version: str) -> str:
     ]
     for cls, v in sorted(r["catch_by_scenario"].items()):
         lines.append(f"| {cls} | {v['flows']} | {v['caught_share'] * 100:.1f}% |")
+    for col, rows in (r.get("breakdown") or {}).items():
+        fprs = sorted({f for row in rows for f in row["recall_at"]}, key=float)
+        lines += [
+            "",
+            f"## Поимка по `{col}`",
+            "",
+            "| класс | "
+            + col
+            + " | потоков | при пороге артефакта | "
+            + " | ".join(f"полнота@{float(f):.1%} ложных" for f in fprs)
+            + " |",
+            "|---|---|---|---|" + "---|" * len(fprs),
+        ]
+        for row in rows:
+            rec = " | ".join(f"{row['recall_at'][f] * 100:.1f}%" for f in fprs)
+            lines.append(
+                f"| {row['class']} | {row[col]} | {row['flows']} | "
+                f"{row['caught_share'] * 100:.1f}% | {rec} |"
+            )
     if r["unexplained"]:
         lines += ["", "## Непойманное — разбор (R16)", ""]
         for u in r["unexplained"]:

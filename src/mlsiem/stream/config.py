@@ -428,6 +428,69 @@ def _parse_normal(raw: dict, lab: LabConfig) -> NormalConfig:
     )
 
 
+def _check_variants(variants: Any, parent: dict, where: str) -> None:
+    """Варианты сценария версии 2 (008): имена уникальны, у каждого есть инструмент и аргументы
+    (свои или родителя), домены параметров — непустые списки, а holdout входит в values."""
+    if not isinstance(variants, list) or not variants:
+        raise ConfigError(f"ключ {where}.variants: нужен непустой список вариантов")
+    seen: set[str] = set()
+    for j, v in enumerate(variants):
+        w = f"{where}.variants[{j}]"
+        if not isinstance(v, dict) or not str(v.get("name", "")).strip():
+            raise ConfigError(f"ключ {w}: нужен словарь с непустым name")
+        if v["name"] in seen:
+            raise ConfigError(f"ключ {w}: вариант {v['name']!r} записан дважды")
+        seen.add(v["name"])
+        for key in ("tool", "args"):
+            if not isinstance(v.get(key, parent.get(key)), str):
+                raise ConfigError(f"ключ {w}.{key}: нужна строка (у варианта или у сценария)")
+        bind = v.get("source_bind")
+        if bind is not None and not (
+            bind == "route" or (isinstance(bind, str) and bind.startswith("flag "))
+        ):
+            raise ConfigError(
+                f"ключ {w}.source_bind: допустимо route или 'flag <аргументы>', а записано {bind!r}"
+            )
+        for pname, dom in (v.get("params") or {}).items():
+            values = dom.get("values") if isinstance(dom, dict) else None
+            if not isinstance(values, list) or not values:
+                raise ConfigError(f"ключ {w}.params.{pname}.values: нужен непустой список")
+            hold = dom.get("holdout") or []
+            if not set(map(str, hold)) <= set(map(str, values)):
+                raise ConfigError(
+                    f"ключ {w}.params.{pname}.holdout: значения должны входить в values"
+                )
+            if len(hold) >= len(values):
+                raise ConfigError(
+                    f"ключ {w}.params.{pname}.holdout: holdout не может занимать все значения"
+                )
+
+
+def _check_sources(raw: dict, lab: LabConfig) -> None:
+    """`lab.sources` (008): имена и адреса уникальны, адреса в сети стенда, не совпадают с "
+    "жертвой."""
+    items = (raw.get("lab") or {}).get("sources")
+    if items is None:
+        return
+    if not isinstance(items, list) or not items:
+        raise ConfigError("ключ lab.sources: нужен непустой список источников")
+    names, ips = set(), set()
+    for i, src in enumerate(items):
+        w = f"lab.sources[{i}]"
+        if not isinstance(src, dict) or not src.get("name") or not src.get("ip"):
+            raise ConfigError(f"ключ {w}: нужны name и ip")
+        if src["name"] in names or src["ip"] in ips:
+            raise ConfigError(f"ключ {w}: имя или адрес источника повторяется")
+        if not lab.in_lab(str(src["ip"])):
+            raise ConfigError(f"ключ {w}.ip: адрес {src['ip']} не в сети стенда {lab.subnet}")
+        if str(src["ip"]) == lab.victim.ip:
+            raise ConfigError(f"ключ {w}.ip: адрес источника совпадает с жертвой")
+        if src.get("role", "attacker") not in ("attacker", "client"):
+            raise ConfigError(f"ключ {w}.role: допустимы attacker и client")
+        names.add(src["name"])
+        ips.add(src["ip"])
+
+
 def _parse_scenarios(raw: dict, lab: LabConfig) -> tuple[ScenarioConfig, ...]:
     from mlsiem.data.taxonomy import CANONICAL
 
@@ -456,7 +519,14 @@ def _parse_scenarios(raw: dict, lab: LabConfig) -> tuple[ScenarioConfig, ...]:
         if target not in lab.victim.services:
             raise ConfigError(f"ключ {where}.target: у жертвы нет службы {target!r}")
         expected = get("expected_class", str)
-        if expected != "out_of_taxonomy" and expected not in CANONICAL:
+        hard = bool(item.get("hard"))
+        if hard and expected != "benign":
+            raise ConfigError(f"ключ {where}.expected_class: у сложной нормы (hard) нужен benign")
+        if (
+            expected != "out_of_taxonomy"
+            and expected not in CANONICAL
+            and not (hard and expected == "benign")
+        ):
             raise ConfigError(
                 f"ключ {where}.expected_class: {expected!r} — не класс таксономии и не "
                 "out_of_taxonomy"
@@ -471,15 +541,26 @@ def _parse_scenarios(raw: dict, lab: LabConfig) -> tuple[ScenarioConfig, ...]:
             for key in ("pcap", "src_map", "dst_map"):
                 if not isinstance(item.get(key), str) or not item[key].strip():
                     raise ConfigError(f"ключ {where}.{key}: у контрольного сценария нужна строка")
+        variants = item.get("variants")
+        if variants is not None:
+            _check_variants(variants, item, where)
         out.append(
             ScenarioConfig(
                 name=name,
                 version=version,
-                tool=get("tool", str),
-                args=get("args", str),
+                tool=item["tool"]
+                if "tool" in item
+                else (get("tool", str) if variants is None else "(варианты)"),
+                args=item["args"]
+                if "args" in item
+                else (get("args", str) if variants is None else "-"),
                 target=target,
                 expected_class=expected,
-                rate_limit=str(get("rate_limit", (str, int, float))),
+                rate_limit=str(
+                    item.get("rate_limit", "см. варианты")
+                    if variants is not None
+                    else get("rate_limit", (str, int, float))
+                ),
                 duration_limit_s=duration,
                 catch_threshold=threshold,
                 pcap=item.get("pcap"),
@@ -541,6 +622,7 @@ def parse_stream_config(raw: Any) -> StreamConfig:
     scenarios: tuple[ScenarioConfig, ...] = ()
     if "lab" in raw:
         lab = _parse_lab(raw)
+        _check_sources(raw, lab)
         normal = _parse_normal(raw, lab) if "normal" in raw else None
         scenarios = _parse_scenarios(raw, lab) if "scenarios" in raw else ()
     return StreamConfig(

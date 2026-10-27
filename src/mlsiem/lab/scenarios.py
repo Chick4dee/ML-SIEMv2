@@ -50,14 +50,26 @@ def default_executor(argv: list[str], timeout_s: float) -> int:
     """Запускает инструмент и ждёт не дольше `timeout_s`; по истечении — убивает.
 
     Возвращает код возврата (при убийстве по пределу — 0: упор в предел для длинной атаки —
-    штатное завершение, см. `ScenarioRunner.run`). Нет программы → FileNotFoundError."""
-    proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        return proc.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        return 0
+    штатное завершение, см. `ScenarioRunner.run`). Нет программы → FileNotFoundError.
+    Хвост stderr последнего запуска остаётся в `default_executor.last_stderr` — для диагностики
+    «инструмент упал сразу» (008); пишется во временный файл, чтобы шумный инструмент
+    не заблокировал канал."""
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=err)
+        try:
+            rc = proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            rc = 0
+        err.seek(0, os.SEEK_END)
+        size = err.tell()
+        err.seek(max(0, size - 400))
+        default_executor.last_stderr = err.read().decode("utf-8", "replace").strip()
+    return rc
+
+
+default_executor.last_stderr = ""
 
 
 # ---------------------------------------------------------------- реестр
@@ -80,7 +92,7 @@ def list_scenarios(raw: dict) -> list[dict]:
         {
             "name": sc["name"],
             "version": str(sc["version"]),
-            "tool": sc["tool"],
+            "tool": sc.get("tool", "(варианты)"),
             "target": sc["target"],
             "expected_class": sc["expected_class"],
             "duration_limit_s": sc["duration_limit_s"],
@@ -217,7 +229,7 @@ class _Lock:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             return False
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(run_uid)
         self._held = True
         return True

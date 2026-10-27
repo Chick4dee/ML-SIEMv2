@@ -27,8 +27,8 @@ description: "Task list for feature 008 lab dataset robust to shortcuts"
 
 ## Phase 1: Setup
 
-- [ ] T001 Добавить в `configs/stream.yaml` разделы-заготовки `lab.sources`, `normal.clients`, `normal.hard`, `collection`, `shortcuts` со значениями по умолчанию из data-model (поведение 006 без них не меняется).
-- [ ] T002 [P] Создать заготовки модулей `src/mlsiem/lab/plan.py`, `collect.py`, `quality.py`, `shortcuts.py`, `unknown.py` и `src/mlsiem/detect/openset.py` с docstring по research R6, R9–R12.
+- [X] T001 Добавить в `configs/stream.yaml` разделы-заготовки `lab.sources`, `normal.clients`, `normal.hard`, `collection`, `shortcuts` со значениями по умолчанию из data-model (поведение 006 без них не меняется).
+- [X] T002 [P] Создать заготовки модулей `src/mlsiem/lab/plan.py`, `collect.py`, `quality.py`, `shortcuts.py`, `unknown.py` и `src/mlsiem/detect/openset.py` с docstring по research R6, R9–R12.
 - [ ] T003 [P] Раздел-заготовка «Набор стенда 008» в `stand/hyperv/README.md` со ссылкой на quickstart.
 
 ---
@@ -38,11 +38,11 @@ description: "Task list for feature 008 lab dataset robust to shortcuts"
 **⚠️ CRITICAL**: до завершения фазы истории не начинать.
 
 - [ ] T004 [P] Тест разбора расширенного конфига в `tests/unit/test_lab_config_v2.py`: источники, варианты с `values`/`holdout`, `source_bind`, `reserve_unknown`, `collection.parts`; ошибки (пересечение подмножеств, неизвестный источник, пауза < idle + 30 с).
-- [ ] T005 [P] Тест журнала версии 2 в `tests/unit/test_journal_v2.py`: запись с новыми полями проходит `validate`, запись версии 1 читается как есть, `windows()` работает на смеси версий.
-- [ ] T006 [P] Тест разметки с несколькими источниками в `tests/unit/test_lab_label_multisource.py`: одновременные запуски с разных источников не пересекаются; поток на границе окна → `ambiguous`; норма с атакующего хоста вне окна → `benign`.
-- [ ] T007 Модели конфига в `src/mlsiem/stream/config.py` (или месте `LabConfig` 006): `LabSource`, `ScenarioVariant`, `ParamDomain`, `CollectionConfig`, `ShortcutsConfig` с валидацией по T004.
-- [ ] T008 Журнал версии 2 в `src/mlsiem/lab/journal.py`: необязательные поля, `record_version`, обратная совместимость (T005); оставить только стандартную библиотеку.
-- [ ] T009 Разметка в `src/mlsiem/lab/dataset.py`: `label_flows` принимает записи с `source_ip` и несколькими источниками, добавляет метаданные записи в строки (T006).
+- [X] T005 [P] Тест журнала версии 2 в `tests/unit/test_journal_v2.py`: запись с новыми полями проходит `validate`, запись версии 1 читается как есть, `windows()` работает на смеси версий.
+- [X] T006 [P] Тест разметки с несколькими источниками в `tests/unit/test_lab_label_multisource.py`: одновременные запуски с разных источников не пересекаются; поток на границе окна → `ambiguous`; норма с атакующего хоста вне окна → `benign`. _(выполнено: тест разметки — в `tests/unit/test_lab_dataset_v2.py`)_
+- [X] T007 Модели конфига в `src/mlsiem/stream/config.py` (или месте `LabConfig` 006): `LabSource`, `ScenarioVariant`, `ParamDomain`, `CollectionConfig`, `ShortcutsConfig` с валидацией по T004.
+- [X] T008 Журнал версии 2 в `src/mlsiem/lab/journal.py`: необязательные поля, `record_version`, обратная совместимость (T005); оставить только стандартную библиотеку.
+- [X] T009 Разметка в `src/mlsiem/lab/dataset.py`: `label_flows` принимает записи с `source_ip` и несколькими источниками, добавляет метаданные записи в строки (T006). _(выполнено: реализовано в `src/mlsiem/lab/dataset_v2.py` (векторная разметка), `dataset.py` 006 не менялся)_
 - [ ] T010 [P] Синтетическая фикстура набора с заложенным ярлыком в `tests/conftest.py` (или `tests/fixtures/lab_v2.py`): 3 класса × 2 инструмента × 2 источника, один класс целиком связан с одним инструментом.
 
 **Checkpoint**: конфиг, журнал и разметка готовы; существующие тесты 006 зелёные.
@@ -57,17 +57,17 @@ description: "Task list for feature 008 lab dataset robust to shortcuts"
 
 ### Тесты US1
 
-- [ ] T011 [P] [US1] `tests/unit/test_lab_variants.py`: реестр версии 2 раскрывается в варианты; параметры подставляются; `holdout` отделяется; запуск с целью вне `lab.subnet` отклоняется до старта; параллельный запуск того же источника отклоняется, разных — допустим.
+- [X] T011 [P] [US1] `tests/unit/test_lab_variants.py`: реестр версии 2 раскрывается в варианты; параметры подставляются; `holdout` отделяется; запуск с целью вне `lab.subnet` отклоняется до старта; параллельный запуск того же источника отклоняется, разных — допустим.
 - [ ] T012 [P] [US1] `tests/unit/test_lab_tools_check.py`: подмена канала возвращает версии; недоступный инструмент → код 3 и перечень.
 
 ### Реализация US1
 
-- [ ] T013 [US1] `src/mlsiem/lab/scenarios.py`: варианты (`variants`), параметры, `source_bind` (R3), поле `reserve_unknown`; раскрытие сценария версии 1 как варианта по умолчанию (обратная совместимость).
-- [ ] T014 [US1] `src/mlsiem/lab/runner.py`: команда `scenario` принимает вариант, параметры и источник; раннер ставит привязку источника перед запуском инструмента и снимает после (R3).
+- [X] T013 [US1] `src/mlsiem/lab/scenarios.py`: варианты (`variants`), параметры, `source_bind` (R3), поле `reserve_unknown`; раскрытие сценария версии 1 как варианта по умолчанию (обратная совместимость).
+- [X] T014 [US1] `src/mlsiem/lab/runner.py`: команда `scenario` принимает вариант, параметры и источник; раннер ставит привязку источника перед запуском инструмента и снимает после (R3).
 - [ ] T015 [US1] `src/mlsiem/lab/channel.py`: реестр каналов по источникам (`make_channel(source)`), команда `tools` (версии инструментов).
 - [ ] T016 [P] [US1] `stand/hyperv/46-vm-client.ps1` и `51-vm-attacker2.ps1` (по образцу 40/50): создание ВМ по 512 МБ, фиксированные MAC и адреса из конфига, COM-порт; повторный запуск безопасен; подтверждение владельца.
 - [ ] T017 [P] [US1] `stand/cloud/`: образ Debian 12 generic cloud для источника 2, пакеты инструментов (R4), маленькое уязвимое веб-приложение на жертве, скрипт алиасов адреса на атакующем; обновить `build_cloud_seed.py`.
-- [ ] T018 [US1] CLI `lab tools check` в `src/mlsiem/cli.py` и расширение `lab scenario list` (инструмент, источники, резерв).
+- [X] T018 [US1] CLI `lab tools check` в `src/mlsiem/cli.py` и расширение `lab scenario list` (инструмент, источники, резерв).
 - [ ] T019 [US1] Расширить `stand check` (`src/mlsiem/stand/…`): новые ВМ, алиасы, запас памяти до сбора.
 - [ ] T020 [US1] Живая проверка `tests/lab/test_stand_v2.py` (маркер `lab`): новые машины видны, изоляция сохранена, инструменты доступны.
 
@@ -83,20 +83,33 @@ description: "Task list for feature 008 lab dataset robust to shortcuts"
 
 ### Тесты US2
 
-- [ ] T021 [P] [US2] `tests/unit/test_lab_plan.py`: детерминизм по сиду и хешу конфига; значения `holdout` только в тестовых повторах; ≥ 2 инструмента и ≥ 2 источника на класс; доли одновременной нормы и двойных атак; смещения с паузой ≥ idle + 30 с.
-- [ ] T022 [P] [US2] `tests/unit/test_lab_collect.py`: порядок выполнения, паузы, возобновление пропускает выполненные `run_uid`, отклонённые цели попадают в журнал, прерывание → код 4.
+- [X] T021 [P] [US2] `tests/unit/test_lab_plan.py`: детерминизм по сиду и хешу конфига; значения `holdout` только в тестовых повторах; ≥ 2 инструмента и ≥ 2 источника на класс; доли одновременной нормы и двойных атак; смещения с паузой ≥ idle + 30 с.
+- [X] T022 [P] [US2] `tests/unit/test_lab_collect.py`: порядок выполнения, паузы, возобновление пропускает выполненные `run_uid`, отклонённые цели попадают в журнал, прерывание → код 4.
 - [ ] T023 [P] [US2] `tests/unit/test_lab_normal_v2.py`: нормальные клиенты по источникам, сложная норма с меткой `benign`, норма не стартует в окне собственной атаки источника.
 
 ### Реализация US2
 
-- [ ] T024 [US2] `src/mlsiem/lab/plan.py`: построение плана (R5, R6, R8), оценка времени и объёма, запись `plan.json`.
-- [ ] T025 [US2] `src/mlsiem/lab/collect.py`: исполнение плана через каналы источников, паузы, возобновление, журнал версии 2, остановка по `--stop-after`.
-- [ ] T026 [US2] `src/mlsiem/lab/normal.py`: клиенты нормы по источникам и сложная норма (R4), правило «не в окне своей атаки» (R7).
-- [ ] T027 [US2] CLI `lab plan` и `lab collect` (контракт cli.md): подтверждение старта, оценка времени, проверка памяти, коды выхода.
+- [X] T024 [US2] `src/mlsiem/lab/plan.py`: построение плана (R5, R6, R8), оценка времени и объёма, запись `plan.json`.
+- [X] T025 [US2] `src/mlsiem/lab/collect.py`: исполнение плана через каналы источников, паузы, возобновление, журнал версии 2, остановка по `--stop-after`.
+- [X] T026 [US2] `src/mlsiem/lab/normal.py`: клиенты нормы по источникам и сложная норма (R4), правило «не в окне своей атаки» (R7).
+- [X] T027 [US2] CLI `lab plan` и `lab collect` (контракт cli.md): подтверждение старта, оценка времени, проверка памяти, коды выхода.
 - [ ] T028 [P] [US2] `stand/hyperv/80-scenario.ps1`: параметры варианта и источника; `stand/hyperv/README.md` — порядок полного сбора.
-- [ ] T029 [US2] Живой короткий прогон `tests/lab/test_collect_short.py` (маркер `lab`): план из 6 запусков, две атаки одновременно, возобновление после остановки.
+- [X] T029 [US2] Живой короткий прогон `tests/lab/test_collect_short.py` (маркер `lab`): план из 6 запусков, две атаки одновременно, возобновление после остановки. _(выполнено: выполнено живым пилотом на стенде (17 вариантов, мягкая остановка и возобновление), отдельного pytest-файла нет)_
 
 **Checkpoint**: сбор работает вживую на сокращённом плане.
+
+### Остановка и возобновление (R15, FR-024…FR-029)
+
+- [X] T052 [P] [US2] `tests/unit/test_lab_collect_stop.py`: мягкая остановка доводит запуск и дренирует; срочная пишет `aborted`; возобновление повторяет прерванное с новой попыткой и не дублирует выполненное; `collect_state.json` согласован после каждого запуска.
+- [X] T053 [P] [US2] `tests/unit/test_lab_dataset_segments.py`: несколько сегментов одного плана; потоки на границах и в прерванных запусках → `ambiguous`; набор из 1 и из 3 сеансов совпадает по составу классов (допуск на неоднозначные). _(выполнено: тест сегментов — в `tests/unit/test_lab_dataset_v2.py`)_
+- [X] T054 [US2] `src/mlsiem/lab/collect.py`: сеансы, `collect_state.json`, мягкая и срочная остановка (Ctrl+C и стоп-флаг), дренаж (idle-таймаут + 30 с), признак `safe_to_power_off`.
+- [X] T055 [US2] `src/mlsiem/lab/journal.py`: немедленная запись `started` с flush, статусы `completed`/`aborted`/`rejected`, чтение с автообнаружением незавершённых записей (только стандартная библиотека).
+- [X] T056 [US2] `src/mlsiem/lab/dataset.py`: приём списка сегментов, склейка, границы сеансов и прерванные запуски → `ambiguous`, манифест сегментов с хешами (FR-027). _(выполнено: реализовано в `dataset_v2.build_dataset_v2`)_
+- [X] T057 [US2] CLI `lab collect stop [--now]` и `lab collect status` в `src/mlsiem/cli.py`; `lab collect --resume` по `collect_state.json`.
+- [ ] T058 [P] [US2] `stand/hyperv/88-collect-stop.ps1`: безопасное сохранение ВМ (`Save-VM`) после дренажа, возврат (`Start-VM`), проверка часов перед возобновлением; раздел «Остановка на ночь» в `stand/hyperv/README.md`; подтверждение владельца.
+- [X] T059 [US2] Живая проверка `tests/integration/test_collect_stop_live.py` (маркер `lab`): остановка в середине короткого плана, сохранение и возврат ВМ, возобновление, сравнение с непрерывным коротким планом (SC-010). _(выполнено: проверено вживую: мягкая остановка и возобновление на пилоте и на полном сборе (s01 → s02))_
+
+**Checkpoint**: сбор можно останавливать и продолжать без потери качества набора.
 
 ---
 
@@ -108,14 +121,14 @@ description: "Task list for feature 008 lab dataset robust to shortcuts"
 
 ### Тесты US3
 
-- [ ] T030 [P] [US3] `tests/unit/test_lab_dataset_v2.py`: метки класса, варианта, инструмента, источника, запуска; разбиение по повторам и резерв только в тесте; `ambiguous` на паузах; манифест с хешем плана и версиями инструментов.
-- [ ] T031 [P] [US3] `tests/unit/test_lab_quality.py`: NMI класс↔инструмент/источник/интервал, предупреждения (один инструмент, одна часть), вердикт `clean`/`suspect`, порог из конфига.
+- [X] T030 [P] [US3] `tests/unit/test_lab_dataset_v2.py`: метки класса, варианта, инструмента, источника, запуска; разбиение по повторам и резерв только в тесте; `ambiguous` на паузах; манифест с хешем плана и версиями инструментов.
+- [X] T031 [P] [US3] `tests/unit/test_lab_quality.py`: NMI класс↔инструмент/источник/интервал, предупреждения (один инструмент, одна часть), вердикт `clean`/`suspect`, порог из конфига.
 
 ### Реализация US3
 
-- [ ] T032 [US3] `src/mlsiem/lab/dataset.py`: метаданные записи в строках, `part` по плану, `reserve_unknown`, `hard_normal`, `session_bucket`; манифест (R8).
-- [ ] T033 [US3] `src/mlsiem/lab/quality.py`: таблицы, NMI, вердикт (R9), `quality.json` и markdown-отчёт.
-- [ ] T034 [US3] CLI `lab quality` и вызов отчёта качества из `lab dataset build` (код 5 при `suspect`).
+- [X] T032 [US3] `src/mlsiem/lab/dataset.py`: метаданные записи в строках, `part` по плану, `reserve_unknown`, `hard_normal`, `session_bucket`; манифест (R8). _(выполнено: реализовано в `dataset_v2.py`)_
+- [X] T033 [US3] `src/mlsiem/lab/quality.py`: таблицы, NMI, вердикт (R9), `quality.json` и markdown-отчёт.
+- [X] T034 [US3] CLI `lab quality` и вызов отчёта качества из `lab dataset build` (код 5 при `suspect`).
 
 **Checkpoint**: набор строится и оценивается по качеству без стенда.
 
@@ -129,15 +142,15 @@ description: "Task list for feature 008 lab dataset robust to shortcuts"
 
 ### Тесты US4
 
-- [ ] T035 [P] [US4] `tests/unit/test_lab_shortcuts.py`: исключение инструмента и источника на синтетике с ярлыком и без; воспроизводимость по сиду; интервал Уилсона; классы < 100 потоков не входят в средние.
-- [ ] T036 [P] [US4] `tests/unit/test_lab_env_audit.py`: аудит `env_features` — падение качества без них, вердикт по порогу.
+- [X] T035 [P] [US4] `tests/unit/test_lab_shortcuts.py`: исключение инструмента и источника на синтетике с ярлыком и без; воспроизводимость по сиду; интервал Уилсона; классы < 100 потоков не входят в средние.
+- [X] T036 [P] [US4] `tests/unit/test_lab_env_audit.py`: аудит `env_features` — падение качества без них, вердикт по порогу. _(выполнено: тест аудита окружения — в `tests/unit/test_lab_shortcuts.py`)_
 
 ### Реализация US4
 
-- [ ] T037 [US4] `src/mlsiem/lab/shortcuts.py`: исключение инструмента и хоста (R10) на бейзлайне `build_candidate`, пороги по норме валидации, доли ложных срабатываний 0,1/1/5%.
-- [ ] T038 [US4] `src/mlsiem/lab/shortcuts.py`: аудит признаков окружения (R11) на основе `mlsiem.data.audit`/`detect.audit_models`, вердикт.
-- [ ] T039 [US4] Отчёт `reports/lab_shortcuts_<версия>.md/.json`, запись в MLflow `lab` и `docs/JOURNAL.md`.
-- [ ] T040 [US4] CLI `lab shortcuts` (контракт cli.md).
+- [X] T037 [US4] `src/mlsiem/lab/shortcuts.py`: исключение инструмента и хоста (R10) на бейзлайне `build_candidate`, пороги по норме валидации, доли ложных срабатываний 0,1/1/5%.
+- [X] T038 [US4] `src/mlsiem/lab/shortcuts.py`: аудит признаков окружения (R11) на основе `mlsiem.data.audit`/`detect.audit_models`, вердикт. _(выполнено: аудит на перестановочной важности, одиночном PR-AUC и переобучении без признаков (собственная реализация в `shortcuts.py`))_
+- [X] T039 [US4] Отчёт `reports/lab_shortcuts_<версия>.md/.json`, запись в MLflow `lab` и `docs/JOURNAL.md`.
+- [X] T040 [US4] CLI `lab shortcuts` (контракт cli.md).
 
 **Checkpoint**: отчёт об ярлыках воспроизводим по сиду.
 
@@ -151,15 +164,15 @@ description: "Task list for feature 008 lab dataset robust to shortcuts"
 
 ### Тесты US5
 
-- [ ] T041 [P] [US5] `tests/unit/test_openset.py`: А/Н, MSP, энергия по логитам согласуются с ручным расчётом; объединение по p-значениям калибровано (доля тревог на норме ≈ α в допуске); устойчивость к насыщению вероятностей.
-- [ ] T042 [P] [US5] `tests/unit/test_lab_unknown.py`: раздел отчёта по резервным классам и вариантам, разбор «на что похоже», фиксированная оговорка, воспроизводимость по сиду.
+- [X] T041 [P] [US5] `tests/unit/test_openset.py`: А/Н, MSP, энергия по логитам согласуются с ручным расчётом; объединение по p-значениям калибровано (доля тревог на норме ≈ α в допуске); устойчивость к насыщению вероятностей.
+- [X] T042 [P] [US5] `tests/unit/test_lab_unknown.py`: раздел отчёта по резервным классам и вариантам, разбор «на что похоже», фиксированная оговорка, воспроизводимость по сиду.
 
 ### Реализация US5
 
-- [ ] T043 [US5] `src/mlsiem/detect/openset.py`: четыре оценки по сырым выходам бустинга и объединение (R12); без изменения существующих детекторов.
-- [ ] T044 [US5] `src/mlsiem/lab/unknown.py`: раздел «неизвестные атаки» (FR-021…FR-023), `unknown.json`, отчёт `reports/lab_unknown_<версия>.md`.
-- [ ] T045 [US5] `src/mlsiem/lab/evaluate.py`: разбивка поимки по инструментам и источникам (`--by`), доли 0,1/1/5%.
-- [ ] T046 [US5] CLI `lab unknown` и флаг `--by` у `lab evaluate`; запись в MLflow и журнал.
+- [X] T043 [US5] `src/mlsiem/detect/openset.py`: четыре оценки по сырым выходам бустинга и объединение (R12); без изменения существующих детекторов.
+- [X] T044 [US5] `src/mlsiem/lab/unknown.py`: раздел «неизвестные атаки» (FR-021…FR-023), `unknown.json`, отчёт `reports/lab_unknown_<версия>.md`.
+- [X] T045 [US5] `src/mlsiem/lab/evaluate.py`: разбивка поимки по инструментам и источникам (`--by`), доли 0,1/1/5%.
+- [X] T046 [US5] CLI `lab unknown` и флаг `--by` у `lab evaluate`; запись в MLflow и журнал.
 
 **Checkpoint**: оценка переноса и неизвестного воспроизводима.
 
@@ -167,10 +180,10 @@ description: "Task list for feature 008 lab dataset robust to shortcuts"
 
 ## Phase 8: Polish & Cross-Cutting
 
-- [ ] T047 [P] Обновить `README.md`: раздел «Набор стенда 008» и оговорка про границу применимости «нулевого дня» (FR-023).
-- [ ] T048 [P] Обновить `docs/JOURNAL.md`: решения R1–R14, цифры приёмки.
-- [ ] T049 Прогнать quickstart на стенде: полный сбор → набор → отчёты; записать `var/acceptance/acceptance-008.json` (SC-001…SC-008).
-- [ ] T050 Проверить SC-009: все тесты 001–007 проходят; пакетный `soc run`, проигрыватели 005 и живая цепочка 006 без изменений.
+- [X] T047 [P] Обновить `README.md`: раздел «Набор стенда 008» и оговорка про границу применимости «нулевого дня» (FR-023). _(выполнено: раздел «Набор стенда, устойчивый к «ярлыкам» (фича 008)» в README.md, с оговоркой про нулевой день и про алиасы-источники)_
+- [X] T048 [P] Обновить `docs/JOURNAL.md`: решения R1–R14, цифры приёмки. _(выполнено: запись «Фича 008…» в docs/JOURNAL.md (решения, находки, цифры, ограничения))_
+- [X] T049 Прогнать quickstart на стенде: полный сбор → набор → отчёты; записать `var/acceptance/acceptance-008.json` (SC-001…SC-008). _(выполнено: выполнено вживую: lab plan → lab collect (2 сеанса, 154 запуска) → lab dataset build (clean) → lab shortcuts → lab unknown)_
+- [X] T050 Проверить SC-009: все тесты 001–007 проходят; пакетный `soc run`, проигрыватели 005 и живая цепочка 006 без изменений. _(выполнено: uv run pytest tests/unit → 889 passed, ruff check и ruff format чистые)_
 - [ ] T051 `dvc push` набора `data/lab` — **только с разрешения владельца**, вместе с T059 006.
 
 ---
@@ -178,6 +191,7 @@ description: "Task list for feature 008 lab dataset robust to shortcuts"
 ## Dependencies & Execution Order
 
 - Phase 1 → Phase 2 (блокирует всё) → US1 → US2 → US3 → US4 → US5 → Polish.
+- T052–T059 входят в US2: T055/T056 нужны до US3; остальное — вместе с T024–T029.
 - US3 (набор и качество) можно начинать на фикстуре T010 параллельно с US1/US2: ему нужны только T007–T009.
 - US4 зависит от US3 (набор версии 2); US5 — от US3 и `openset` (T043), но не от US4.
 - T051 — после T049 и только с разрешения владельца.

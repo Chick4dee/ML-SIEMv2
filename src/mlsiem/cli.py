@@ -966,6 +966,8 @@ def cmd_lab_report(args, cfg) -> int:
 
 def cmd_lab_dataset_build(args, cfg) -> int:
     """Собрать размеченный набор стенда из записи сеанса и журнала (US4, R12)."""
+    if getattr(args, "collect_dir", None):
+        return _lab_collect_module().cmd_dataset_build_v2(args, cfg)
     import tempfile
 
     from mlsiem.data.extract import extract_flows
@@ -1017,7 +1019,8 @@ def cmd_lab_evaluate(args, cfg) -> int:
     lossy = bool((manifest.get("sensor_losses") or {}).get("flows_dropped")) or bool(
         (manifest.get("sensor_losses") or {}).get("packets_dropped")
     )
-    report = evaluate_dataset(model, labeled, [], catch_thresholds=catch, lossy=lossy)
+    by = [c.strip() for c in args.by.split(",") if c.strip()] if getattr(args, "by", None) else None
+    report = evaluate_dataset(model, labeled, [], catch_thresholds=catch, lossy=lossy, by=by)
     version = manifest.get("version") or dataset_dir.name
     md, js = write_report(report, Path(args.reports_dir), version)
     _record_lab_eval_mlflow(args, report, model, version)
@@ -1660,15 +1663,104 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--journal", help="журнал сценариев (JSONL, забранный с машины)")
     b.add_argument("--version", help="версия набора (по умолчанию метка времени)")
     b.add_argument("--out", help="каталог набора (по умолчанию data/lab/<версия>)")
+    b.add_argument(
+        "--collect-dir",
+        dest="collect_dir",
+        help="каталог сбора lab collect (фича 008): набор версии 2 из сегментов сеансов",
+    )
     b.set_defaults(func=cmd_lab_dataset_build)
+
+    # ---- фича 008: план и сбор набора, проверка инструментов
+    q = lsub.add_parser("plan", help="построить план сбора набора (фича 008)")
+    q.add_argument("--seed", type=int, help="сид плана (по умолчанию collection.seed)")
+    q.add_argument("--repeats", type=int, help="число повторов (по умолчанию collection.repeats)")
+    q.add_argument("--out", help="файл плана (по умолчанию var/lab/collect/plan.json)")
+    q.set_defaults(func=lambda a, c: _lab_collect_module().cmd_plan(a, c))
+
+    q = lsub.add_parser("collect", help="сбор набора по плану: run (по умолчанию) | stop | status")
+    q.add_argument(
+        "action", nargs="?", choices=("run", "stop", "status"), help="действие (по умолчанию run)"
+    )
+    q.add_argument("--plan", help="файл плана (по умолчанию <workdir>/plan.json)")
+    q.add_argument("--workdir", help="каталог сбора (по умолчанию var/lab/collect)")
+    q.add_argument("--yes", action="store_true", help="не спрашивать подтверждения старта")
+    q.add_argument(
+        "--stop-after", type=int, dest="stop_after", help="остановиться мягко после N запусков"
+    )
+    q.add_argument(
+        "--now", action="store_true", help="для stop: срочная остановка (прервать запуск)"
+    )
+    q.set_defaults(func=lambda a, c: _lab_collect_module().cmd_collect(a, c))
+
+    q = lsub.add_parser("quality", help="отчёт качества набора версии 2 и вердикт clean/suspect")
+    q.add_argument("--dataset", required=True, help="версия набора или путь к data/lab/<версия>")
+    q.set_defaults(func=lambda a, c: _lab_collect_module().cmd_quality(a, c))
+
+    q = lsub.add_parser("tools", help="проверка инструментов вариантов и записи на сенсоре")
+    tsub = q.add_subparsers(dest="tools_command", required=True)
+    t = tsub.add_parser("check", help="версии инструментов на атакующей машине")
+    t.set_defaults(func=lambda a, c: _lab_collect_module().cmd_tools_check(a, c))
+
+    q = lsub.add_parser(
+        "shortcuts", help="аудит ярлыков: исключение инструмента/адреса, признаки окружения"
+    )
+    q.add_argument("--dataset", required=True, help="версия набора или путь к data/lab/<версия>")
+    q.add_argument(
+        "--seeds", type=int, nargs="+", help="сиды (по умолчанию из конфига shortcuts.seeds)"
+    )
+    q.add_argument("--reports-dir", default="reports", help="куда писать отчёт")
+    q.add_argument("--mlflow-dir", default=".", help="где mlflow.db и mlruns/")
+    q.set_defaults(func=lambda a, c: _lab_collect_module().cmd_shortcuts(a, c))
+
+    q = lsub.add_parser(
+        "unknown", help="неизвестные атаки: резервные варианты и класс целиком, способы оценки"
+    )
+    q.add_argument("--dataset", required=True, help="версия набора или путь к data/lab/<версия>")
+    q.add_argument(
+        "--seeds", type=int, nargs="+", help="сиды (по умолчанию из конфига shortcuts.seeds)"
+    )
+    q.add_argument("--reports-dir", default="reports", help="куда писать отчёт")
+    q.add_argument("--mlflow-dir", default=".", help="где mlflow.db и mlruns/")
+    q.set_defaults(func=lambda a, c: _lab_collect_module().cmd_unknown(a, c))
+
+    q = lsub.add_parser(
+        "transfer", help="эксперимент: прирост от обучения на данных стенда (протокол в reports/)"
+    )
+    q.add_argument("--dataset", required=True, help="версия набора или путь к data/lab/<версия>")
+    q.add_argument(
+        "--seeds", type=int, nargs="+", help="сиды основных рукавов (по умолчанию 0 1 2)"
+    )
+    q.add_argument(
+        "--curve", type=int, nargs="*", help="размеры кривой обучения (повторы), по умолчанию 2 4"
+    )
+    q.add_argument(
+        "--level",
+        choices=["flows", "windows", "all"],
+        default="flows",
+        help="этап: потоки (по умолчанию), окна или оба",
+    )
+    q.add_argument("--out", help="каталог результатов (по умолчанию var/lab/transfer/<версия>)")
+    q.add_argument("--reports-dir", default="reports", help="куда писать итоговый отчёт")
+    q.add_argument("--mlflow-dir", default=".", help="где mlflow.db и mlruns/")
+    q.set_defaults(func=lambda a, c: _lab_collect_module().cmd_transfer(a, c))
 
     q = lsub.add_parser("evaluate", help="честная оценка модели на наборе стенда (FR-022)")
     q.add_argument("--dataset", required=True, help="версия набора или путь к data/lab/<версия>")
     q.add_argument("--model", help="каталог модели (по умолчанию ансамбль/детектор)")
+    q.add_argument(
+        "--by",
+        help="разбивка поимки по метаданным набора версии 2, через запятую: tool,source,variant",
+    )
     q.add_argument("--reports-dir", default="reports", help="куда писать отчёт оценки")
     q.add_argument("--mlflow-dir", default=".", help="где mlflow.db и mlruns/")
     q.set_defaults(func=cmd_lab_evaluate)
     return parser
+
+
+def _lab_collect_module():
+    from mlsiem.lab import commands
+
+    return commands
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -132,3 +132,39 @@ def test_write_report_files(model, labeled, tmp_path):
     saved = json.loads(js.read_text(encoding="utf-8"))
     assert saved["threshold"] == rep["threshold"]
     assert "Поимка по сценариям" in md.read_text(encoding="utf-8")
+
+
+def test_разбивка_по_инструменту_и_источнику(model, labeled, tmp_path):
+    df, cls = labeled
+    # метаданные набора версии 2: у атак два инструмента и два источника, у нормы их нет; часть val
+    # для порогов долей
+    df = df.with_columns(
+        pl.when(pl.col("label") == BENIGN)
+        .then(None)
+        .otherwise(
+            pl.when(pl.int_range(pl.len()) % 2 == 0).then(pl.lit("A")).otherwise(pl.lit("B"))
+        )
+        .alias("tool"),
+        pl.when(pl.col("label") == BENIGN)
+        .then(None)
+        .otherwise(
+            pl.when(pl.int_range(pl.len()) % 3 == 0).then(pl.lit("s1")).otherwise(pl.lit("s2"))
+        )
+        .alias("source"),
+        pl.lit("val").alias("part"),
+    )
+    rep = evaluate_dataset(model, df, _records(cls), by=["tool", "source"])
+    assert set(rep["breakdown"]) == {"tool", "source"}
+    tools = {r["tool"]: r for r in rep["breakdown"]["tool"]}
+    assert set(tools) == {"A", "B"} and all(r["class"] == cls for r in tools.values())
+    assert sum(r["flows"] for r in tools.values()) == sum(
+        r["flows"] for r in rep["breakdown"]["source"]
+    )
+    for r in tools.values():
+        assert 0.0 <= r["caught_share"] <= 1.0
+        # более мягкая доля ложных срабатываний не снижает полноту
+        assert r["recall_at"]["0.001"] <= r["recall_at"]["0.01"] <= r["recall_at"]["0.05"]
+    md, _ = write_report(rep, tmp_path, "v2")
+    assert "Поимка по `tool`" in md.read_text(encoding="utf-8")
+    # без by разбивки нет — формат 006 не меняется
+    assert evaluate_dataset(model, df, _records(cls))["breakdown"] == {}

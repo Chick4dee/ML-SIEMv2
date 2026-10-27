@@ -117,6 +117,13 @@ lab:
     memory_mb: 1024
     cpus: 1
     disk_gb: 10
+  # Источники трафика (008, R2): атакующий и его алиасы на интерфейсе lab0; норма идёт с тех же
+  # адресов, поэтому адрес источника не определяет класс. Клиент нормы и вторая атакующая ВМ
+  # добавляются сюда же (role: client | attacker)
+  sources:
+    - {name: attacker,    ip: 10.88.0.30, role: attacker, os: ubuntu-24.04}
+    - {name: attacker_a2, ip: 10.88.0.32, role: attacker, os: ubuntu-24.04, alias_of: attacker}
+    - {name: attacker_a3, ip: 10.88.0.33, role: attacker, os: ubuntu-24.04, alias_of: attacker}
   # Сенсор (R7): процесс на брокерной машине (placement: broker) со вторым адаптером в
   # mlsiem-lab без IP; vm — запасной вариант R7a (отдельная ВМ-сенсор). iface — интерфейс-
   # приёмник зеркала в госте. buffer_flows — сколько завершённых потоков копить при
@@ -151,7 +158,11 @@ lab:
 # Фоновая норма (R14, FR-019): обычный трафик к службам жертвы. Раннер на атакующей машине
 # каждые period_s секунд делает по одному «шагу» из mix — вес шага задаёт долю
 normal:
-  period_s: 5
+  # 008: норма идёт с нескольких адресов стенда и в несколько рабочих потоков — набору нужны
+  # тысячи нормальных потоков в тесте (SC-002); period_s — пауза рабочего между шагами
+  period_s: 0.4
+  workers: 2
+  sources: [attacker, attacker_a2, attacker_a3]
   mix:
     web: 5
     ssh: 1
@@ -219,3 +230,232 @@ scenarios:
     rate_limit: "100 соединений/с"
     duration_limit_s: 90
     catch_threshold: 0.3
+
+  # --- Фича 008: сценарии версии 2 с вариантами (инструмент, параметры, источник) -------------
+  # Вариант = поля сценария + свои. source_bind: `flag <аргументы>` — флаги инструмента ({src},
+  # {iface}); `route` — маршрут с нужным src на время запуска. params: values — допустимые значения
+  # (первое — по умолчанию), holdout — значения только для тестовых повторов (FR-005).
+  # reserve_unknown — класс или вариант присутствует только в тесте (FR-021). tool_label — имя
+  # инструмента в журнале, если tool — оболочка. {port} — порт службы target.
+  - name: scan
+    version: "2"
+    target: web
+    expected_class: reconnaissance
+    rate_limit: "см. варианты"
+    duration_limit_s: 120
+    catch_threshold: 0.3
+    variants:
+      - name: nmap_syn
+        tool: nmap
+        args: "-sS -Pn -p {ports} -T{timing} {target}"
+        source_bind: "flag -S {src} -e {iface}"
+        params:
+          ports: {values: ["1-1024", "1-65535", "22,80,443,8080"], holdout: ["1-65535"]}
+          timing: {values: [3, 4, 2], holdout: [2]}
+      - name: nmap_connect
+        tool: nmap
+        args: "-sT -Pn -p {ports} -T{timing} {target}"
+        source_bind: route
+        params:
+          ports: {values: ["1-1024", "1-65535", "22,80,443,8080"], holdout: ["1-65535"]}
+          timing: {values: [3, 4, 2], holdout: [2]}
+      - name: masscan
+        tool: masscan
+        args: "-p{ports} --rate {rate} --interface {iface} --source-ip {src} --router-ip {target} {target}"
+        reserve_unknown: true
+        params:
+          ports: {values: ["1-1024", "1-9000"], holdout: ["1-9000"]}
+          rate: {values: [500, 2000], holdout: [2000]}
+  - name: fuzz
+    version: "2"
+    target: web
+    expected_class: fuzzers
+    rate_limit: "см. варианты"
+    duration_limit_s: 120
+    catch_threshold: 0.3
+    variants:
+      - name: ffuf
+        tool: ffuf
+        args: "-u http://{target}:{port}/FUZZ -w /usr/share/wordlists/common.txt -rate {rate} -t {threads} -s"
+        source_bind: route
+        params:
+          rate: {values: [100, 200, 400], holdout: [400]}
+          threads: {values: [10, 40], holdout: [40]}
+      - name: gobuster
+        tool: gobuster
+        args: "dir -u http://{target}:{port}/ -w /usr/share/wordlists/common.txt -t {threads} -q --no-error"
+        source_bind: route
+        reserve_unknown: true
+        params:
+          threads: {values: [10, 30], holdout: [30]}
+  - name: ssh_brute
+    version: "2"
+    target: ssh
+    expected_class: out_of_taxonomy
+    rate_limit: "см. варианты"
+    duration_limit_s: 120
+    catch_threshold: 0.3
+    variants:
+      - name: hydra
+        tool: hydra
+        args: "-l {ssh_user} -P /usr/share/wordlists/pass.txt -t {threads} ssh://{target}"
+        source_bind: route
+        params:
+          threads: {values: [4, 2, 8], holdout: [8]}
+      - name: medusa
+        tool: medusa
+        args: "-h {target} -u {ssh_user} -P /usr/share/wordlists/pass.txt -M ssh -t {threads}"
+        source_bind: route
+        params:
+          threads: {values: [4, 2, 8], holdout: [8]}
+  - name: slow_dos
+    version: "2"
+    target: web
+    expected_class: dos
+    rate_limit: "см. варианты"
+    duration_limit_s: 90
+    catch_threshold: 0.3
+    variants:
+      - name: slowhttptest
+        tool: slowhttptest
+        args: "-c {conns} -H -i 10 -r 100 -t GET -u http://{target}:{port}/ -l 60"
+        source_bind: route
+        params:
+          conns: {values: [200, 400, 300], holdout: [300]}
+      - name: slowloris
+        tool: slowloris
+        args: "{target} -p {port} -s {sockets} --sleeptime 10 -v"
+        source_bind: route
+        params:
+          sockets: {values: [150, 300, 100], holdout: [100]}
+  - name: flood
+    version: "2"
+    target: web
+    expected_class: dos
+    rate_limit: "см. варианты"
+    duration_limit_s: 60
+    catch_threshold: 0.3
+    variants:
+      - name: hping_syn
+        tool: hping3
+        args: "-S -p {port} -i u{interval} -q {target}"
+        # hping3 (сырые сокеты) не берёт src-подсказку маршрута, а для адреса-алиаса сваливается
+        # в 127.0.0.1 — пакеты тогда не привязываются к окну атаки и утекают в benign; поэтому
+        # источник задаём флагом самого hping (-a), это детерминированно и помечается верно.
+        source_bind: "flag -a {src}"
+        params:
+          interval: {values: [2000, 1000, 500], holdout: [500]}
+      - name: hping_udp
+        tool: hping3
+        target: dns
+        args: "--udp -p {port} -d {size} -i u{interval} -q {target}"
+        source_bind: "flag -a {src}"
+        params:
+          size: {values: [64, 512], holdout: [512]}
+          interval: {values: [2000, 1000], holdout: [1000]}
+  - name: exploit
+    version: "2"
+    target: web
+    expected_class: exploits
+    rate_limit: "см. варианты"
+    duration_limit_s: 120
+    catch_threshold: 0.3
+    variants:
+      - name: sqlmap
+        tool: sqlmap
+        args: "-u http://{target}:8080/search?q=1 --batch --level {level} --risk 1 --technique B --threads {threads} --flush-session -v 0"
+        source_bind: route
+        params:
+          level: {values: [1, 2, 3], holdout: [3]}
+          threads: {values: [1, 4], holdout: [4]}
+      - name: nikto
+        tool: nikto
+        version_arg: "-Version"
+        args: "-h http://{target}:{port} -Tuning {tuning} -maxtime {maxtime}s -nointeractive"
+        source_bind: route
+        params:
+          tuning: {values: ["1", "4", "9"], holdout: ["9"]}
+          maxtime: {values: [60, 100], holdout: [100]}
+  - name: beacon
+    version: "2"
+    target: web
+    expected_class: out_of_taxonomy
+    reserve_unknown: true
+    rate_limit: "один запрос раз в 3–12 с"
+    duration_limit_s: 130
+    catch_threshold: 0.3
+    variants:
+      - name: curl_loop
+        tool: bash
+        tool_label: curl_loop
+        args: "-c 'end=$((SECONDS+{dur})); while [ $SECONDS -lt $end ]; do curl -s -m 3 -o /dev/null --interface {src} http://{target}:{port}/api/status; sleep $(( {period} + RANDOM % {jitter} )); done'"
+        params:
+          dur: {values: [100]}
+          period: {values: [3, 5, 8], holdout: [8]}
+          jitter: {values: [2, 4]}
+      - name: wget_loop
+        tool: bash
+        tool_label: wget_loop
+        args: "-c 'end=$((SECONDS+{dur})); while [ $SECONDS -lt $end ]; do wget -q -O /dev/null -T 3 --bind-address={src} http://{target}:{port}/api/status; sleep $(( {period} + RANDOM % {jitter} )); done'"
+        params:
+          dur: {values: [100]}
+          period: {values: [3, 5, 8], holdout: [8]}
+          jitter: {values: [2, 4]}
+  # Сложная норма (FR-004): внешне похожа на атаку, метка benign
+  - name: hard_normal
+    version: "2"
+    target: web
+    hard: true
+    expected_class: benign
+    rate_limit: "см. варианты"
+    duration_limit_s: 100
+    catch_threshold: 0.3
+    variants:
+      - name: ab_loadtest
+        tool: ab
+        version_arg: "-V"
+        args: "-B {src} -n {requests} -c {conc} -q http://{target}:{port}/"
+        params:
+          requests: {values: [1500, 3000], holdout: [3000]}
+          conc: {values: [10, 30], holdout: [30]}
+      - name: nmap_monitor
+        tool: bash
+        tool_label: nmap_monitor
+        args: "-c 'for i in $(seq 1 {n}); do nmap -sT -Pn -p 22,80,443 --max-retries 1 {target} >/dev/null; sleep {gap}; done'"
+        source_bind: route
+        params:
+          n: {values: [20, 30], holdout: [30]}
+          gap: {values: [2, 4]}
+
+# --- Фича 008: сбор набора (R6, R8, R15) ---------------------------------------------------------
+# План строится по сиду из сценариев версий `versions`; раунд r — повтор r всех вариантов в случайном
+# порядке, поэтому порядок по времени совпадает с порядком повторов (разбиение по времени = по
+# повторам). Паузы ≥ idle-таймаут экстрактора + 30 с: потоки предыдущего запуска закрываются.
+collection:
+  seed: 7
+  repeats: 10
+  versions: ["2"]
+  pause_s: 150
+  # Доля запусков, в которых норма идёт и во время атаки (в паузах она идёт всегда)
+  normal_share: 0.67
+  # Сколько раз за раунд выполняется резервный («неизвестный») вариант — только в тестовых раундах
+  reserve_runs_per_round: 3
+  parts: {train: [1, 2, 3, 4, 5, 6], val: [7, 8], test: [9, 10]}
+  # Запись сеанса на сенсорной машине (tcpdump на приёмнике зеркала), забирается на хост
+  capture:
+    ssh: mlsiem@10.77.0.50
+    iface: labmir
+    remote_dir: /var/lib/mlsiem/lab
+    rotate_mb: 4000
+    ssh_options: ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "UserKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=no"]
+  # Запас по времени ответа раннера сверх предела запуска, с
+  reply_margin_s: 40
+
+# --- Фича 008: аудит ярлыков (R9–R11) ---------------------------------------------------------
+shortcuts:
+  min_test_flows: 100
+  seeds: [0, 1, 2]
+  fpr_levels: [0.001, 0.01, 0.05]
+  audit_drop_threshold: 0.05
+  env_features: [bidirectional_ece_packets, bidirectional_cwr_packets, bidirectional_urg_packets,
+                 bidirectional_min_ps, bidirectional_max_ps]

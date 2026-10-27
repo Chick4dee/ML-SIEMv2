@@ -47,7 +47,7 @@ ATTACKER_PACKAGES = (
 )
 # Модули раннера, которые копируются на атакующую машину как есть (только stdlib, R6) — тест
 # проверяет именно тот код, что поедет на машину
-RUNNER_MODULES = ("journal", "scenarios", "normal", "runner")
+RUNNER_MODULES = ("journal", "scenarios", "variants", "normal", "runner")
 LAB_SRC = Path(__file__).resolve().parents[1] / "lab"
 RUNNER_ROOT = "/opt/mlsiem/lib"
 DEFAULT_PUBKEY = Path.home() / ".ssh" / "id_ed25519.pub"

@@ -16,9 +16,16 @@
 ```powershell
 uv run mlsiem lab plan --seed 7 --repeats 10 --out var\lab\plan.json
 uv run mlsiem lab collect --plan var\lab\plan.json        # подтверждение старта, 10–11 часов
-# после прерывания:
+# безопасно остановить (из другого окна или Ctrl+C):
+uv run mlsiem lab collect stop
+# дождаться «можно выключать» (печатает status), затем выключать компьютер
+uv run mlsiem lab collect status
+# продолжить в любой день:
 uv run mlsiem lab collect --plan var\lab\plan.json --resume
 ```
+
+Сбор удобно вести сеансами по 3–4 часа. Набор из нескольких сеансов строится одной командой
+`lab dataset build` со списком сегментов; потоки на стыках помечаются неоднозначными.
 
 ## 3. Набор и качество
 
